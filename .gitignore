@@ -1,0 +1,70 @@
+# AETHER / Veyra runtime
+.aether/
+.veyra/
+.tmp_explorer/
+
+# Temporary / generated files
+.tmp_*/
+tmp/
+temp/
+*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Secrets / local configuration
+.env
+.env.*
+!.env.example
+
+# Local databases / runtime state
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# IDE / editors
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Veyra generated/encrypted media
+*.aimg
+
+# Temporary test artifacts
+.tmp_groupsort/
+.tmp_*/
+test-results/
+playwright-report/

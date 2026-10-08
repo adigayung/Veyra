@@ -1,0 +1,7 @@
+# Veyra runtime dependencies
+betrayer
+Flask>=3.0
+pywebview
+cryptography>=42
+argon2-cffi>=23
+pillow>=10

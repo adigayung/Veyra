@@ -5,7 +5,7 @@ Startup order — and why it matters:
 1. The Flask backend is started on a daemon thread. ``make_server`` binds the
    socket inside its constructor, so as soon as the thread object exists the
    backend is already *listening*. Startup is therefore deterministic and does
-   not need a fixed ``time.sleep()`` delay.
+   not need a fixed ``time.sleep()`` delay
 2. The native, maximized window is created and ``webview.start()`` takes over
    the GUI event loop (this is a native desktop window, not an external
    browser).

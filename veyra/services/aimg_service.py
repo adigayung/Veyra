@@ -1,24 +1,34 @@
 """Authenticated ``.aimg`` container built on top of the Veyra crypto session.
 
-Format (version 2)::
+Format (version 3, password-as-key-source)::
 
     "AIMG" | header_len (4, big endian) | header (JSON, header_len) |
     thumb_ciphertext (thumb_len) | payload_ciphertext
 
 * The header is authenticated as **AAD**, so its fields (original extension,
-  salt, nonce, thumbnail length, ...) cannot be tampered with unnoticed.
+  per-file salt, nonce, thumbnail length, derivation salt, ...) cannot be
+  tampered with unnoticed.
 * The payload is AES-256-GCM (authenticated encryption) with a fresh 12 byte
   nonce from the native CSPRNG.
-* The per file key is derived from the **session master key** with
-  HKDF-SHA256.  There is therefore exactly one password for the whole vault
-  (never one password per ``.aimg``), and no operation - not even reading the
-  header key - is possible while the crypto session is locked.
+* The per file key is derived from the **login password**::
+
+      password_key = Argon2id(password, dsalt)          # once per dsalt, cached
+      payload_key  = HKDF-SHA256(password_key, salt=file_salt,
+                                 info=b"veyra.aimg.payload.v3")
+
+  where ``dsalt`` is the derivation salt carried in the header (``dsalt``) and
+  ``file_salt`` is the per-file random salt (``salt``).  The header therefore
+  makes a ``.aimg`` file self describing / portable: the same password opens it
+  even without the local key store.
+* With a **different** password the AES-256-GCM tag simply fails: the file
+  cannot be opened (it never decrypts to another image).
 * An optional small thumbnail is embedded (also encrypted) so grid previews of
   a folder with thousands of files do not require decrypting every full image.
 
-The previous version-1 files were keyed directly from the password.  They are
-detected on read and rejected with a clear message instead of being silently
-mis-decrypted.
+Container ``version == 2`` (the previous master-key design) is **not** read on
+the normal path: it raises :class:`AimgMigrationRequired` and can only be
+converted through the explicit migration API (which unwraps the old master key
+from the preserved legacy key store).
 """
 
 from __future__ import annotations
@@ -32,11 +42,20 @@ from io import BytesIO
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
 from veyra.security import native_backend
 from veyra.security.crypto_session import CryptoService, LockedError
 
 MAGIC = b"AIMG"
-VERSION = 2
+#: Current container version (password derived per-file keys).
+VERSION = 3
+#: Previous container version (master-key derived per-file keys), migration only.
+MASTER_VERSION = 2
+#: Oldest container version (rejected outright).
 LEGACY_VERSION = 1
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg"}
 
@@ -50,10 +69,19 @@ MIME_TYPES = {
     ".svg": "image/svg+xml",
 }
 
+#: Key derivation scheme marker stored in the v3 header.
+SCHEME = "pw-argon2-hkdf"
+
 _SALT_SIZE = 16
 _NONCE_SIZE = 12
-_PAYLOAD_INFO = b"veyra.aimg.payload.v2"
-_THUMB_INFO = b"veyra.aimg.thumb.v2"
+_DERIVATION_SALT_MIN = 8
+
+#: HKDF info labels for the current (password based) scheme.
+_PAYLOAD_INFO = b"veyra.aimg.payload.v3"
+_THUMB_INFO = b"veyra.aimg.thumb.v3"
+#: HKDF info labels of the legacy (master key) scheme - migration only.
+_PAYLOAD_INFO_V2 = b"veyra.aimg.payload.v2"
+_THUMB_INFO_V2 = b"veyra.aimg.thumb.v2"
 
 #: Embedded thumbnail settings (kept intentionally small).
 THUMBNAIL_MAX = 256
@@ -68,6 +96,14 @@ _THUMB_CACHE_BYTES = 32 * 1024 * 1024
 
 class AimgError(ValueError):
     """Raised for any ``.aimg`` format / authentication failure."""
+
+
+class AimgAuthError(AimgError):
+    """Raised when AES-256-GCM authentication fails (wrong password/tamper)."""
+
+
+class AimgMigrationRequired(AimgError):
+    """Raised when a legacy (v2, master key) container needs migration."""
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +167,9 @@ class AimgHeader:
     thumb_len: int
     header_bytes: bytes
     raw_size: int
+    dsalt: bytes = b""
+    width: int = 0
+    height: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -141,13 +180,8 @@ class AimgHeader:
         }
 
 
-def _parse(path: Path) -> Tuple[AimgHeader, bytes, bytes]:
-    """Return ``(header, thumb_ciphertext, payload_ciphertext)``."""
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise AimgError(f"Tidak dapat membaca file: {exc}") from exc
-
+def _parse_bytes(raw: bytes, *, allow_legacy: bool = False) -> Tuple[AimgHeader, bytes, bytes]:
+    """Return ``(header, thumb_ciphertext, payload_ciphertext)`` from raw bytes."""
     if len(raw) < 8 or raw[:4] != MAGIC:
         raise AimgError("Format .aimg tidak valid.")
     length = int.from_bytes(raw[4:8], "big")
@@ -166,7 +200,13 @@ def _parse(path: Path) -> Tuple[AimgHeader, bytes, bytes]:
             "File .aimg versi lama (berbasis password) tidak didukung; "
             "impor ulang dengan crypto session."
         )
-    if version != VERSION:
+    if version == MASTER_VERSION:
+        if not allow_legacy:
+            raise AimgMigrationRequired(
+                "File .aimg format lama (v2, kunci master) perlu dimigrasi ke v3 "
+                "lewat /api/aimg/migrate."
+            )
+    elif version != VERSION:
         raise AimgError("Versi .aimg tidak didukung.")
     ext = meta.get("ext")
     if ext not in SUPPORTED_EXTENSIONS:
@@ -187,6 +227,15 @@ def _parse(path: Path) -> Tuple[AimgHeader, bytes, bytes]:
     if thumb_len and len(thumb_nonce) != _NONCE_SIZE:
         raise AimgError("Parameter keamanan .aimg tidak valid.")
 
+    dsalt = b""
+    if version == VERSION:
+        try:
+            dsalt = bytes.fromhex(meta.get("dsalt", ""))
+        except (TypeError, ValueError) as exc:
+            raise AimgError("Parameter derivasi .aimg tidak valid.") from exc
+        if len(dsalt) < _DERIVATION_SALT_MIN:
+            raise AimgError("Parameter derivasi .aimg tidak valid.")
+
     body = raw[8 + length:]
     if thumb_len > len(body):
         raise AimgError("Header .aimg rusak (thumbnail melebihi payload).")
@@ -202,8 +251,20 @@ def _parse(path: Path) -> Tuple[AimgHeader, bytes, bytes]:
         thumb_len=thumb_len,
         header_bytes=header_bytes,
         raw_size=len(raw),
+        dsalt=dsalt,
+        width=int(meta.get("w", 0) or 0),
+        height=int(meta.get("h", 0) or 0),
     )
     return header, thumb_ct, payload_ct
+
+
+def _parse(path: Path, *, allow_legacy: bool = False) -> Tuple[AimgHeader, bytes, bytes]:
+    """Return ``(header, thumb_ciphertext, payload_ciphertext)`` for a file."""
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as exc:
+        raise AimgError(f"Tidak dapat membaca file: {exc}") from exc
+    return _parse_bytes(raw, allow_legacy=allow_legacy)
 
 
 def inspect_metadata(path) -> dict:
@@ -227,18 +288,20 @@ def inspect_metadata(path) -> dict:
         raise AimgError("Header .aimg rusak.") from exc
 
     version = meta.get("version")
-    if version not in (VERSION, LEGACY_VERSION):
+    if version not in (VERSION, MASTER_VERSION, LEGACY_VERSION):
         raise AimgError("Versi .aimg tidak didukung.")
     ext = meta.get("ext")
-    if version == VERSION and ext not in SUPPORTED_EXTENSIONS:
+    if version in (VERSION, MASTER_VERSION) and ext not in SUPPORTED_EXTENSIONS:
         raise AimgError("Format image tidak didukung.")
     return {
         "version": version,
         "extension": ext,
         "mime_type": MIME_TYPES.get(ext, "application/octet-stream"),
-        "has_thumbnail": int(meta.get("thumb", 0)) > 0,
-        "width": int(meta.get("w", 0)) or None,
-        "height": int(meta.get("h", 0)) or None,
+        "has_thumbnail": int(meta.get("thumb", 0) or 0) > 0,
+        "width": int(meta.get("w", 0) or 0) or None,
+        "height": int(meta.get("h", 0) or 0) or None,
+        "scheme": meta.get("scheme"),
+        "needs_migration": version == MASTER_VERSION,
     }
 
 
@@ -251,9 +314,32 @@ def is_aimg(path) -> bool:
 # crypto operations
 # ---------------------------------------------------------------------------
 
-def _derive_keys(crypto: CryptoService, salt: bytes) -> Tuple[bytes, bytes]:
-    payload_key = crypto.derive_subkey(salt, _PAYLOAD_INFO)
-    thumb_key = crypto.derive_subkey(salt, _THUMB_INFO)
+def _keys_from_password_key(password_key: bytes, file_salt: bytes) -> Tuple[bytes, bytes]:
+    """Derive the per-file payload/thumbnail keys from a password key."""
+    payload_key = HKDF(
+        algorithm=hashes.SHA256(), length=32, salt=file_salt, info=_PAYLOAD_INFO
+    ).derive(password_key)
+    thumb_key = HKDF(
+        algorithm=hashes.SHA256(), length=32, salt=file_salt, info=_THUMB_INFO
+    ).derive(password_key)
+    return payload_key, thumb_key
+
+
+def _derive_keys(crypto: CryptoService, dsalt: bytes, file_salt: bytes) -> Tuple[bytes, bytes]:
+    """Derive per-file keys from the session password key (cached per dsalt)."""
+    payload_key = crypto.derive_subkey(dsalt, file_salt, _PAYLOAD_INFO)
+    thumb_key = crypto.derive_subkey(dsalt, file_salt, _THUMB_INFO)
+    return payload_key, thumb_key
+
+
+def _legacy_keys(master_key: bytes, file_salt: bytes) -> Tuple[bytes, bytes]:
+    """Legacy (v2, master key) per-file keys - migration read only."""
+    payload_key = HKDF(
+        algorithm=hashes.SHA256(), length=32, salt=file_salt, info=_PAYLOAD_INFO_V2
+    ).derive(master_key)
+    thumb_key = HKDF(
+        algorithm=hashes.SHA256(), length=32, salt=file_salt, info=_THUMB_INFO_V2
+    ).derive(master_key)
     return payload_key, thumb_key
 
 
@@ -284,6 +370,40 @@ def _make_thumbnail(path: Path, ext: str) -> Tuple[bytes, Optional[int], Optiona
         return b"", None, None
 
 
+def _build_container(ext: str, payload: bytes, thumb: bytes,
+                     width: int, height: int, dsalt: bytes,
+                     password_key: bytes) -> bytes:
+    """Assemble a version 3 ``.aimg`` blob (fresh salt/nonce, header as AAD)."""
+    salt = native_backend.random_bytes(_SALT_SIZE)
+    nonce = native_backend.random_bytes(_NONCE_SIZE)
+    thumb_nonce = native_backend.random_bytes(_NONCE_SIZE) if thumb else b""
+
+    # The stored thumbnail field is the *ciphertext* length (plaintext + 16 byte
+    # GCM tag), which is what the reader uses to split the body.
+    thumb_ct_len = (len(thumb) + 16) if thumb else 0
+    meta = {
+        "version": VERSION,
+        "ext": ext,
+        "salt": salt.hex(),
+        "nonce": nonce.hex(),
+        "tnonce": thumb_nonce.hex(),
+        "thumb": thumb_ct_len,
+        "w": int(width) if width else 0,
+        "h": int(height) if height else 0,
+        "alg": "AES-256-GCM",
+        "kdf": "HKDF-SHA256",
+        "scheme": SCHEME,
+        "dsalt": dsalt.hex(),
+    }
+    header_bytes = json.dumps(meta, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+    payload_key, thumb_key = _keys_from_password_key(password_key, salt)
+    payload_ct = AESGCM(payload_key).encrypt(nonce, payload, header_bytes)
+    thumb_ct = AESGCM(thumb_key).encrypt(thumb_nonce, thumb, header_bytes) if thumb else b""
+
+    return MAGIC + len(header_bytes).to_bytes(4, "big") + header_bytes + thumb_ct + payload_ct
+
+
 def encrypt_file(image, crypto: CryptoService) -> Path:
     """Encrypt ``image`` into ``image.aimg`` (replacement, not a copy).
 
@@ -303,44 +423,25 @@ def encrypt_file(image, crypto: CryptoService) -> Path:
         raise LockedError("Crypto session terkunci. Unlock diperlukan.")
 
     target = source.with_suffix(".aimg")
-    salt = native_backend.random_bytes(_SALT_SIZE)
-    nonce = native_backend.random_bytes(_NONCE_SIZE)
-    thumb, img_width, img_height = _make_thumbnail(source, ext)
-    thumb_nonce = native_backend.random_bytes(_NONCE_SIZE) if thumb else b""
+    # Every file of the vault shares the key store derivation salt so it is
+    # portable (the salt is stamped into the header).
+    dsalt = crypto.derivation_salt
+    password_key = crypto.password_key_for(dsalt)
 
-    # The stored thumbnail field is the *ciphertext* length (plaintext + 16 byte
-    # GCM tag), which is what the reader uses to split the body.
-    thumb_ct_len = (len(thumb) + 16) if thumb else 0
-    meta = {
-        "version": VERSION,
-        "ext": ext,
-        "salt": salt.hex(),
-        "nonce": nonce.hex(),
-        "tnonce": thumb_nonce.hex(),
-        "thumb": thumb_ct_len,
-        "w": int(img_width) if img_width else 0,
-        "h": int(img_height) if img_height else 0,
-        "alg": "AES-256-GCM",
-        "kdf": "HKDF-SHA256",
-    }
-    header_bytes = json.dumps(meta, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    thumb, img_width, img_height = _make_thumbnail(source, ext)
 
     try:
         payload = source.read_bytes()
     except OSError as exc:
         raise AimgError(f"Tidak dapat membaca sumber: {exc}") from exc
 
-    payload_key, thumb_key = _derive_keys(crypto, salt)
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-    payload_ct = AESGCM(payload_key).encrypt(nonce, payload, header_bytes)
-    thumb_ct = AESGCM(thumb_key).encrypt(thumb_nonce, thumb, header_bytes) if thumb else b""
-
-    blob = MAGIC + len(header_bytes).to_bytes(4, "big") + header_bytes + thumb_ct + payload_ct
+    blob = _build_container(ext, payload, thumb, img_width or 0, img_height or 0,
+                            dsalt, password_key)
     _atomic_create(target, blob)
 
     try:
-        # Authenticate + verify the freshly written container before touching the source.
+        # Authenticate + verify the freshly written container before touching
+        # the source.
         raw_check = read_payload(target, crypto)
         if raw_check != payload:
             raise AimgError("Verifikasi hasil enkripsi gagal.")
@@ -379,12 +480,14 @@ def read_payload(aimg, crypto: CryptoService) -> bytes:
     header, _thumb_ct, payload_ct = _parse(Path(aimg))
     if not crypto.is_unlocked():
         raise LockedError("Crypto session terkunci. Unlock diperlukan.")
-    payload_key, _ = _derive_keys(crypto, header.salt)
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
+    payload_key, _ = _derive_keys(crypto, header.dsalt, header.salt)
     try:
         return AESGCM(payload_key).decrypt(header.nonce, payload_ct, header.header_bytes)
-    except Exception as exc:  # noqa: BLE001 - InvalidTag etc.
+    except InvalidTag as exc:
+        raise AimgAuthError(
+            "Tidak dapat membuka: password berbeda / file rusak."
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
         raise AimgError("Authentication .aimg gagal atau file dimodifikasi.") from exc
 
 
@@ -395,11 +498,13 @@ def read_thumbnail(aimg, crypto: CryptoService) -> Optional[bytes]:
         return None
     if not crypto.is_unlocked():
         raise LockedError("Crypto session terkunci. Unlock diperlukan.")
-    _, thumb_key = _derive_keys(crypto, header.salt)
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
+    _, thumb_key = _derive_keys(crypto, header.dsalt, header.salt)
     try:
         return AESGCM(thumb_key).decrypt(header.thumb_nonce, thumb_ct, header.header_bytes)
+    except InvalidTag as exc:
+        raise AimgAuthError(
+            "Thumbnail tidak dapat dibuka: password berbeda / file rusak."
+        ) from exc
     except Exception as exc:  # noqa: BLE001
         raise AimgError("Thumbnail .aimg gagal diautentikasi.") from exc
 
@@ -410,12 +515,95 @@ def validate_aimg(aimg, crypto: Optional[CryptoService] = None, full: bool = Fal
     With ``crypto`` unlocked and ``full=True`` the payload is fully decrypted
     and authenticated; otherwise only the header structure is checked.
     """
-    header, _thumb_ct, _payload_ct = _parse(Path(aimg))
+    _parse(Path(aimg))
     if full:
         if crypto is None:
             raise AimgError("Crypto session diperlukan untuk validasi penuh.")
         read_payload(aimg, crypto)
     return True
+
+
+# ---------------------------------------------------------------------------
+# explicit migration (v2 master-key -> v3 password)
+# ---------------------------------------------------------------------------
+
+def _container_version(path) -> Optional[int]:
+    """Return the container version of a file, or ``None`` when unreadable."""
+    try:
+        return int(inspect_metadata(path).get("version"))
+    except (AimgError, OSError, ValueError, TypeError):
+        return None
+
+
+def migrate_file(aimg, master_key: bytes, dsalt: bytes,
+                 target_password_key: bytes) -> Path:
+    """Convert one legacy (v2) ``.aimg`` into a v3 (password keyed) container.
+
+    The old master key (unwrapped from the preserved legacy key store) decrypts
+    the payload/thumbnail, which is then re-encrypted with
+    ``target_password_key`` (Argon2id(target_password, dsalt)).  The original
+    extension, thumbnail and dimensions are preserved.
+    """
+    source = Path(aimg)
+    if not source.is_file():
+        raise AimgError("File .aimg tidak ditemukan.")
+
+    header, thumb_ct, payload_ct = _parse(source, allow_legacy=True)
+    if header.version != MASTER_VERSION:
+        raise AimgError("File ini bukan format lama (v2) yang perlu dimigrasi.")
+
+    payload_key, thumb_key = _legacy_keys(master_key, header.salt)
+    try:
+        payload = AESGCM(payload_key).decrypt(header.nonce, payload_ct, header.header_bytes)
+    except InvalidTag as exc:
+        raise AimgAuthError("Password legacy salah atau file rusak.") from exc
+
+    thumb = b""
+    if header.thumb_len and thumb_ct:
+        try:
+            thumb = AESGCM(thumb_key).decrypt(
+                header.thumb_nonce, thumb_ct, header.header_bytes)
+        except InvalidTag:
+            thumb = b""
+
+    blob = _build_container(header.ext, payload, thumb, header.width, header.height,
+                            dsalt, target_password_key)
+
+    # Authenticate the new container before replacing the original.
+    parsed, _t, new_payload_ct = _parse_bytes(blob)
+    new_payload_key, _ = _keys_from_password_key(target_password_key, parsed.salt)
+    if AESGCM(new_payload_key).decrypt(parsed.nonce, new_payload_ct,
+                                       parsed.header_bytes) != payload:
+        raise AimgError("Verifikasi migrasi gagal.")
+
+    _atomic_replace(source, blob)
+    return source
+
+
+def migrate_folder(root, master_key: bytes, dsalt: bytes,
+                   target_password_key: bytes, progress: Optional[Callable] = None) -> dict:
+    """Convert every legacy (v2) ``.aimg`` under ``root`` to v3."""
+    root = Path(root)
+    if not root.is_dir():
+        raise AimgError("Folder tidak valid atau tidak ditemukan.")
+
+    found = sorted(p for p in root.rglob("*.aimg") if p.is_file())
+    result = {"found": len(found), "success": 0, "failed": 0, "skipped": 0,
+              "errors": [], "items": []}
+    for path in found:
+        if _container_version(path) != MASTER_VERSION:
+            result["skipped"] += 1
+            continue
+        try:
+            migrate_file(path, master_key, dsalt, target_password_key)
+            result["success"] += 1
+            result["items"].append(str(path))
+        except Exception as exc:  # noqa: BLE001 - isolate single file failure
+            result["failed"] += 1
+            result["errors"].append({"path": str(path), "error": str(exc)})
+        if progress:
+            progress(result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +614,22 @@ def _atomic_create(target: Path, data: bytes) -> None:
     """Create ``target`` atomically; refuse to overwrite an existing file."""
     if target.exists():
         raise FileExistsError(f"Target sudah ada: {target}")
+    fd, temp = tempfile.mkstemp(prefix=".aimg-", dir=str(target.parent))
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temp, target)
+    finally:
+        try:
+            os.unlink(temp)
+        except FileNotFoundError:
+            pass
+
+
+def _atomic_replace(target: Path, data: bytes) -> None:
+    """Atomically *replace* ``target`` with ``data`` (migration only)."""
     fd, temp = tempfile.mkstemp(prefix=".aimg-", dir=str(target.parent))
     try:
         with os.fdopen(fd, "wb") as out:
@@ -496,7 +700,14 @@ class AimgService:
         return self.crypto.is_unlocked()
 
     def unlock(self, password: str) -> bool:
-        return self.crypto.unlock(password)
+        """Open the session (any non-empty password) and drop stale cache.
+
+        Re-unlocking with a different password must never serve plaintext that
+        was decrypted with the previous password, so the cache is cleared.
+        """
+        result = self.crypto.unlock(password)
+        self.clear_cache()
+        return result
 
     def lock(self) -> None:
         self.crypto.lock()
@@ -508,6 +719,11 @@ class AimgService:
     def clear_cache(self) -> None:
         self._payload_cache.clear()
         self._thumb_cache.clear()
+
+    @property
+    def argon2_derivations(self) -> int:
+        """Number of Argon2id derivations done by the underlying session."""
+        return self.crypto.argon2_derivations
 
     # -- cache helpers ------------------------------------------------
     @staticmethod
@@ -561,3 +777,59 @@ class AimgService:
 
     def decrypt_folder(self, path, progress=None) -> dict:
         return decrypt_folder_recursive(path, self.crypto, progress)
+
+    # -- migration (v2 -> v3) -----------------------------------------
+    def migrate(self, path, legacy_password: str, target_password: str,
+                batch: bool = False) -> dict:
+        """Migrate legacy (v2) ``.aimg`` files to the v3 password scheme.
+
+        ``legacy_password`` unwraps the old master key from the preserved v1 key
+        store; ``target_password`` derives the new per-file keys.  A folder is
+        migrated one file at a time (``batch=False``) so a single sample can be
+        verified before the mass ``batch=True`` run.
+        """
+        if not self.crypto.is_unlocked():
+            raise LockedError("Crypto session terkunci. Unlock diperlukan.")
+
+        master_key = self.crypto.unwrap_legacy_master_key(legacy_password)
+        dsalt = self.crypto.derivation_salt
+        target_password_key = self.crypto.password_key_for_password(target_password, dsalt)
+
+        try:
+            target = Path(path)
+            if target.is_file():
+                migrate_file(target, master_key, dsalt, target_password_key)
+                result = {"found": 1, "success": 1, "failed": 0, "skipped": 0,
+                          "errors": [], "items": [str(target)], "sample": True}
+            elif target.is_dir():
+                if batch:
+                    result = migrate_folder(target, master_key, dsalt, target_password_key)
+                    result["sample"] = False
+                else:
+                    candidate = self._first_legacy(target)
+                    if candidate is None:
+                        result = {"found": 0, "success": 0, "failed": 0, "skipped": 0,
+                                  "errors": [], "items": [], "sample": True}
+                    else:
+                        migrate_file(candidate, master_key, dsalt, target_password_key)
+                        result = {"found": 1, "success": 1, "failed": 0, "skipped": 0,
+                                  "errors": [], "items": [str(candidate)], "sample": True}
+            else:
+                raise AimgError("Path tidak valid atau tidak ditemukan.")
+        finally:
+            try:
+                master_key = bytearray(master_key)
+                for index in range(len(master_key)):
+                    master_key[index] = 0
+            except Exception:  # noqa: BLE001 - best effort wipe
+                pass
+
+        self.clear_cache()
+        return result
+
+    @staticmethod
+    def _first_legacy(root: Path) -> Optional[Path]:
+        for path in sorted(p for p in root.rglob("*.aimg") if p.is_file()):
+            if _container_version(path) == MASTER_VERSION:
+                return path
+        return None

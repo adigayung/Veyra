@@ -173,7 +173,16 @@ function bindCards() {
     });
     im.addEventListener('error', function () {
       var thumb = im.closest('.thumb');
-      if (thumb) { thumb.classList.add('broken'); thumb.textContent = '⚠'; im.remove(); }
+      var card = im.closest('.card');
+      var item = card ? state.images[Number(card.dataset.index)] : null;
+      if (thumb) {
+        thumb.classList.add('broken', 'locked-thumb');
+        thumb.textContent = '🔒';
+        thumb.title = (item && item.encrypted)
+          ? 'Tidak dapat dibuka: password berbeda atau file terkunci'
+          : 'Thumbnail tidak dapat dimuat';
+        im.remove();
+      }
     });
   });
   applySelectionClasses();

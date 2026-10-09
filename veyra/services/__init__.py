@@ -12,12 +12,16 @@ from veyra.services.image_service import ImageService, FileService, ImageInfo
 from veyra.services.aimg_service import (
     AimgService,
     AimgError,
+    AimgAuthError,
+    AimgMigrationRequired,
     encrypt_file,
     decrypt_file,
     read_payload,
     read_thumbnail,
     inspect_metadata,
     validate_aimg,
+    migrate_file,
+    migrate_folder,
     encrypt_folder_recursive,
     decrypt_folder_recursive,
 )
@@ -62,12 +66,16 @@ __all__ = [
     # aimg
     "AimgService",
     "AimgError",
+    "AimgAuthError",
+    "AimgMigrationRequired",
     "encrypt_file",
     "decrypt_file",
     "read_payload",
     "read_thumbnail",
     "inspect_metadata",
     "validate_aimg",
+    "migrate_file",
+    "migrate_folder",
     "encrypt_folder_recursive",
     "decrypt_folder_recursive",
     # groups / database (Betrayer data layer)

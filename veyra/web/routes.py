@@ -11,8 +11,14 @@ Crypto boundary
 The ``/api/aimg/*`` endpoints and the ``.aimg`` branches of ``/api/image`` and
 ``/api/thumb`` do **not** trust any request flag: they ask the
 :class:`~veyra.security.crypto_session.CryptoService` whether the session is
-really unlocked (native DPAPI ticket + master key verifier) before touching
+really unlocked (native DPAPI sealed session material) before touching
 encrypted bytes.  When it is locked the requests are refused with HTTP 403.
+
+The login accepts **any** non-empty password (the password is only a key
+source); a file encrypted with a different password fails AES-256-GCM
+authentication and is reported as ``status: "locked"`` (HTTP 422), while a
+legacy (v2, master key) container is reported as ``status:
+"migration_required"`` (HTTP 409) until it is explicitly migrated.
 """
 
 from __future__ import annotations
@@ -30,10 +36,11 @@ from veyra.security.crypto_session import (
     CryptoError,
     CryptoService,
     LockedError,
-    WrongPasswordError,
 )
 from veyra.services import (
+    AimgAuthError,
     AimgError,
+    AimgMigrationRequired,
     AimgService,
     FileOpsError,
     FileOpsService,
@@ -222,13 +229,15 @@ def _resolve_database(app: BetrayerApplication):
 # ---------------------------------------------------------------------------
 # Centralized login session: idle auto-lock (5 minutes)
 # ---------------------------------------------------------------------------
-# The master password is never stored anywhere.  The only thing kept here is the
+# The password is never stored at rest: it only provides, for the duration of an
+# unlocked session, the native (DPAPI) sealed session material that
+# ``CryptoService`` keeps in backend memory.  The only thing kept here is the
 # *wall clock* of the last keyboard/mouse activity reported by the UI; the
-# crypto session itself is enforced by ``CryptoService`` (DPAPI + Argon2id +
-# master-key verifier).  After 5 minutes of inactivity the UI calls
-# ``/api/session/lock`` which calls ``aimg_service.lock()`` (drops the master
-# key + clears every cached plaintext).  The login screen re-appears, the user
-# re-types the SAME password, and ``/api/aimg/unlock`` re-opens the session.
+# crypto session itself is enforced by ``CryptoService`` (DPAPI + Argon2id
+# password key).  After 5 minutes of inactivity the UI calls
+# ``/api/session/lock`` which calls ``aimg_service.lock()`` (wipes the session
+# material + clears every cached plaintext).  The login screen re-appears, the
+# user re-types a password, and ``/api/aimg/unlock`` re-opens the session.
 #
 # Only the monotonic timestamp lives at module scope (shared by every route
 # handler); the crypto capability check uses the per-router ``aimg_service``.
@@ -441,10 +450,20 @@ def create_router(app: BetrayerApplication) -> WebRouter:
                 data, mime_type = aimg_service.payload(raw_path)
             except LockedError:
                 return Response.json(
-                    {"ok": False, "error": "Crypto session terkunci."},
-                    status=403)
+                    {"ok": False, "status": "locked",
+                     "error": "Crypto session terkunci."}, status=403)
+            except AimgMigrationRequired as exc:
+                return Response.json(
+                    {"ok": False, "status": "migration_required",
+                     "error": str(exc)}, status=409)
+            except AimgAuthError as exc:
+                return Response.json(
+                    {"ok": False, "status": "locked", "error": str(exc)},
+                    status=422)
             except AimgError as exc:
-                return Response.text(str(exc), status=422)
+                return Response.json(
+                    {"ok": False, "status": "failed", "error": str(exc)},
+                    status=422)
             except OSError:
                 return Response.text(
                     f"Image not found: {raw_path}", status=404)
@@ -481,10 +500,20 @@ def create_router(app: BetrayerApplication) -> WebRouter:
                 data, mime_type = thumb
             except LockedError:
                 return Response.json(
-                    {"ok": False, "error": "Crypto session terkunci."},
-                    status=403)
+                    {"ok": False, "status": "locked",
+                     "error": "Crypto session terkunci."}, status=403)
+            except AimgMigrationRequired as exc:
+                return Response.json(
+                    {"ok": False, "status": "migration_required",
+                     "error": str(exc)}, status=409)
+            except AimgAuthError as exc:
+                return Response.json(
+                    {"ok": False, "status": "locked", "error": str(exc)},
+                    status=422)
             except AimgError as exc:
-                return Response.text(str(exc), status=422)
+                return Response.json(
+                    {"ok": False, "status": "failed", "error": str(exc)},
+                    status=422)
             return Response(data, content_type=mime_type,
                             headers=_image_headers(mime_type))
 
@@ -504,12 +533,13 @@ def create_router(app: BetrayerApplication) -> WebRouter:
 
     @router.post("/api/aimg/unlock")
     def aimg_unlock_handler(request, context) -> Response:
-        """Unlock the crypto session with the given password.
+        """Open the crypto session with **any** non-empty password.
 
-        This is the single login/unlock endpoint for the whole application:
-        the centralized startup login screen and the auto-lock re-login both
-        POST here with the master password, which unlocks CryptoService
-        (Argon2id -> KEK -> unwrap master key -> DPAPI session ticket).
+        This is the single login/unlock endpoint for the whole application.
+        There is no password gate anymore: the password is only a *key source*
+        (Argon2id(password, dsalt) -> per-file keys), so a password that does
+        not match a file simply cannot open that file - it is never rejected
+        here.
         """
         payload = request.get_json(default={}) or {}
         password = payload.get("password")
@@ -518,9 +548,6 @@ def create_router(app: BetrayerApplication) -> WebRouter:
                                  status=400)
         try:
             aimg_service.unlock(password)
-        except WrongPasswordError:
-            return Response.json(
-                {"ok": False, "error": "Password salah."}, status=401)
         except CryptoError as exc:
             return Response.json({"ok": False, "error": str(exc)}, status=400)
         # The session is live again: reset the idle activity clock so the
@@ -579,9 +606,9 @@ def create_router(app: BetrayerApplication) -> WebRouter:
         """Lock the session (manual lock or idle auto-lock).
 
         Calls the same ``aimg_service.lock()`` as the Tools -> Lock button: it
-        drops the DPAPI session ticket, wipes the fallback key and clears every
-        cached plaintext, so ``.aimg`` access is refused again until the user
-        re-types the master password on the login screen.
+        drops the DPAPI session ticket, wipes the session material and clears
+        every cached plaintext, so ``.aimg`` access is refused again until the
+        user re-types a password on the login screen.
         """
         aimg_service.lock()
         return Response.json({
@@ -637,6 +664,52 @@ def create_router(app: BetrayerApplication) -> WebRouter:
         except AimgError as exc:
             return Response.json({"ok": False, "error": str(exc)})
         aimg_service.clear_cache()
+        return Response.json({"ok": True, **result})
+
+    @router.post("/api/aimg/migrate")
+    def aimg_migrate_handler(request, context) -> Response:
+        """Explicitly migrate legacy (v2, master key) ``.aimg`` files to v3.
+
+        Requires the ``legacy_password`` (to unwrap the old master key from the
+        preserved legacy key store) and a ``target_password`` (to key the new
+        v3 containers).  A folder is migrated one sample at a time unless
+        ``batch: true`` is given - the sample must be verified before the mass
+        run is attempted.
+        """
+        payload = request.get_json(default={}) or {}
+        raw_path = payload.get("path") or request.query.get("path")
+        legacy_password = payload.get("legacy_password")
+        target_password = payload.get("target_password") or payload.get("password")
+        batch = bool(payload.get("batch"))
+        if not raw_path:
+            return Response.json({"ok": False, "error": "Parameter 'path' wajib."},
+                                 status=400)
+        if not isinstance(legacy_password, str) or not legacy_password:
+            return Response.json(
+                {"ok": False, "error": "Parameter 'legacy_password' wajib."},
+                status=400)
+        if not isinstance(target_password, str) or not target_password:
+            return Response.json(
+                {"ok": False, "error": "Parameter 'target_password' wajib."},
+                status=400)
+        if not aimg_service.is_unlocked():
+            return Response.json(
+                {"ok": False, "status": "locked",
+                 "error": "Crypto session terkunci."}, status=403)
+        target = image_service.resolve_path(raw_path)
+        if target is None or not target.exists():
+            return Response.json(
+                {"ok": False, "error": "Path tidak valid atau tidak ditemukan."},
+                status=400)
+        try:
+            result = aimg_service.migrate(
+                target, legacy_password, target_password, batch=batch)
+        except CryptoError as exc:  # e.g. legacy password wrong / no legacy store
+            return Response.json({"ok": False, "error": str(exc)}, status=400)
+        except AimgAuthError as exc:
+            return Response.json({"ok": False, "error": str(exc)}, status=422)
+        except AimgError as exc:
+            return Response.json({"ok": False, "error": str(exc)}, status=400)
         return Response.json({"ok": True, **result})
 
     # -- groups (database backed, Betrayer Data Layer) -------------------

@@ -151,6 +151,28 @@ function findTreeNode(path) {
   return found;
 }
 
+/* Bring the node for ``path`` to the vertical CENTRE of the tree viewport so
+   the folder the viewer just opened is always clearly visible, instead of the
+   selection changing off-screen.  The scroll is deferred one frame so layout
+   has settled after a lazy/async expansion mounted the node.  Guarded on both
+   ends: an empty path or a node that is not in the DOM yet (ancestors still
+   loading) is a silent no-op - the explorer never throws here.  Only the
+   node's own scroll ancestor (``.explorer-body``) moves, so the Image Grid and
+   the page viewport are never touched. */
+function focusActiveNode(path) {
+  if (!path) return;
+  var node = findTreeNode(path);
+  if (!node) return;
+  var schedule = (typeof requestAnimationFrame === 'function')
+    ? requestAnimationFrame
+    : function (fn) { return setTimeout(fn, 0); };
+  schedule(function () {
+    if (node && typeof node.scrollIntoView === 'function') {
+      node.scrollIntoView({ block: 'center', inline: 'nearest' });
+    }
+  });
+}
+
 /* Cumulative prefixes of an absolute path, drive root first
    (e.g. "J:\a\b" -> ["J:\", "J:\a", "J:\a\b"]). */
 function pathChain(path) {
@@ -215,11 +237,21 @@ function refreshTreeNode(path, opts) {
 
 /* Keep the explorer in sync with the folder the viewer is showing: refresh an
    existing node, otherwise expand its ancestors (drive first) so the folder
-   becomes visible and navigable in the tree. */
+   becomes visible and navigable in the tree.  Either way the active node is
+   marked selected AND scrolled to the centre of the tree viewport, so the
+   visual focus always follows the active path. */
 function syncTree(path) {
   if (!path) return;
-  if (findTreeNode(path)) { return refreshTreeNode(path); }
-  revealTreePath(path).then(function () { markSelectedDir(path); });
+  if (findTreeNode(path)) {
+    return refreshTreeNode(path).then(function () {
+      markSelectedDir(path);
+      focusActiveNode(path);
+    });
+  }
+  return revealTreePath(path).then(function () {
+    markSelectedDir(path);
+    focusActiveNode(path);
+  });
 }
 
 /* -- path bar / navigation ------------------------------------------------- */

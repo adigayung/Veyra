@@ -11,8 +11,9 @@ The suite drives the **real** Veyra backend (the same Flask app used by
 Chromium via Playwright**, plus direct HTTP checks for the crypto boundary:
 
  1. startup with no login      -> the login screen is shown (app body gated);
- 2. correct password           -> Veyra opens;
- 3. wrong password             -> stays locked, never enters the app;
+ 2. correct password           -> Veyra opens (and opens the vault files);
+ 3. ANY password               -> opens the app (no gate); a file encrypted with
+                                  a DIFFERENT password stays locked (422);
  4. Encrypt while the session is active asks for NO second password;
  5. Decrypt while the session is active asks for NO second password;
  6. ``.aimg`` can be previewed while the session is unlocked;
@@ -305,16 +306,20 @@ def main() -> int:  # noqa: C901 - a linear verification script is intentional
         check(body.get("unlocked") is False, "backend crypto session locked at startup")
 
         # ---------------------------------------------------------------- 3
-        section("3. Wrong password -> stays locked, never enters the app")
-        type_login(page, "definitely-wrong")
-        page.wait_for_timeout(1200)
-        check(login_screen_visible(page), "login overlay still shown after wrong password")
-        check(page.inner_text("#loginStatus") != "", "an error message is shown")
-        check(page.input_value("#loginPass") != "", "password field keeps focus for a retry")
+        section("3. ANY password opens the app (no gate)")
+        login(page, "definitely-wrong")
+        check(not login_screen_visible(page),
+              "login overlay hidden for an arbitrary password")
         status, body = http_json("GET", base + "/api/aimg/status")
-        check(body.get("unlocked") is False, "crypto session still locked (wrong password)")
+        check(body.get("unlocked") is True, "session unlocked with an arbitrary password")
         r = http("GET", base + f"/api/image?path={secret_aimg}")
-        check(r[0] == 403, "locked .aimg preview refused (HTTP 403)")
+        check(r[0] == 422, "file with a different password -> 422 (locked)")
+        r = http("GET", base + f"/api/thumb?path={secret_aimg}")
+        check(r[0] == 422, "thumb with a different password -> 422 (locked)")
+        # Lock again so the next section can open with the vault password.
+        http_json("POST", base + "/api/session/lock", {})
+        page.reload(wait_until="load")
+        page.wait_for_selector("#loginOverlay", timeout=15000)
 
         # ---------------------------------------------------------------- 2
         section("2. Correct password -> Veyra opens")
@@ -409,12 +414,15 @@ def main() -> int:  # noqa: C901 - a linear verification script is intentional
         check(status == 403, "decrypt-files refused while locked (403)")
 
         # ---------------------------------------------------------------- 8
-        section("8. After auto-lock the login screen returns (and is usable)")
+        section("8. After auto-lock the login screen returns (any password works)")
         check(login_screen_visible(page), "login overlay visible after the auto-lock")
-        # wrong password on the auto-lock screen keeps it locked
-        type_login(page, "still-wrong")
-        page.wait_for_timeout(1000)
-        check(login_screen_visible(page), "wrong password after auto-lock keeps it locked")
+        # No gate: any password re-opens the app after the auto-lock.
+        login(page, "still-wrong")
+        check(not login_screen_visible(page),
+              "any password after auto-lock opens the app")
+        http_json("POST", base + "/api/session/lock", {})
+        page.reload(wait_until="load")
+        page.wait_for_selector("#loginOverlay", timeout=15000)
 
         # --------------------------------------------------------------- 10
         section("10. Login again -> session unlocks and the app is usable")

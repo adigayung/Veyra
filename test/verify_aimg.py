@@ -51,7 +51,7 @@ def section(title: str) -> None:
 def main() -> int:
     # ------------------------------------------------------------------ audit
     section("Source audit: no hardcoded secrets")
-    src_dir = Path(__file__).resolve().parent / "veyra"
+    src_dir = Path(__file__).resolve().parent.parent / "veyra"
     blob = "\n".join(
         p.read_text(encoding="utf-8", errors="ignore")
         for p in src_dir.rglob("*.py")
@@ -64,9 +64,9 @@ def main() -> int:
     check("CryptProtectData" in blob, "native DPAPI boundary present")
 
     # ----------------------------------------------------------- crypto session
-    section("Crypto session")
+    section("Crypto session (password as key source)")
     from veyra.security.crypto_session import (
-        CryptoService, LockedError, WrongPasswordError,
+        CryptoService, CryptoError, LockedError,
     )
     from veyra.services.aimg_service import AimgService, _BoundedCache
 
@@ -79,21 +79,20 @@ def main() -> int:
         check(True, "encrypt refused while locked")
 
     svc.initialize(PASSWORD)
-    check(svc.is_unlocked() is True, "unlock with correct password")
+    check(svc.is_unlocked() is True, "first unlock opens the session")
     sealed = svc.encrypt(b"payload", aad=b"hdr")
     check(svc.decrypt(sealed, aad=b"hdr") == b"payload", "encrypt/decrypt roundtrip")
-    check(svc.validate(PASSWORD) is True, "validate() true for correct password")
+    check(svc.validate(PASSWORD) is True, "validate() true for a valid key source")
 
     svc.lock()
     check(svc.is_unlocked() is False, "lock() closes the session")
-    try:
-        svc.unlock("wrong")
-        check(False, "wrong password rejected")
-    except WrongPasswordError:
-        check(True, "wrong password rejected")
-    check(svc.is_unlocked() is False, "still locked after failed unlock")
-    check(svc.validate("wrong") is False, "validate() false for wrong password")
+    # Any non-empty password is accepted: the password is a per-file key source,
+    # not a login gate (see verify_password_key.py).
+    check(svc.unlock("wrong") is True, "any password unlocks (no gate)")
+    check(svc.is_unlocked() is True, "session open after an arbitrary password")
+    check(svc.validate("wrong") is True, "validate() true for any password")
 
+    svc.lock()
     svc._unlocked = True          # classic fake flag
     svc.crypto_unlocked = True
     svc.logged_in = True
@@ -246,10 +245,10 @@ def main() -> int:
           "client flags do not grant crypto capability")
     check(client.post("/api/aimg/encrypt", json={"path": str(browse)}).status_code == 403,
           "encrypt while locked refused (403)")
-    check(client.post("/api/aimg/unlock", json={"password": "nope"}).status_code == 401,
-          "wrong password -> 401")
-    check(j(client.get("/api/aimg/status")).get("unlocked") is False,
-          "still locked after wrong password")
+    no_gate = j(client.post("/api/aimg/unlock", json={"password": "nope"}))
+    check(no_gate.get("ok") is True and no_gate.get("unlocked") is True,
+          "any password logs in (no 401 gate)")
+    client.post("/api/aimg/lock", json={})
 
     body = j(client.post("/api/aimg/unlock", json={"password": PASSWORD}))
     check(body.get("unlocked") is True, "unlock with correct password")

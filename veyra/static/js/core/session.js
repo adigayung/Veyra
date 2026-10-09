@@ -3,10 +3,12 @@
    Centralized login session (startup gate + idle auto-lock).
 
    One password, one unlock.  The login overlay is the single gate before the
-   app body (startup) and after an idle auto-lock.  The password is never kept
-   in JS/UI state: it is typed into the field, POSTed to /api/aimg/unlock
-   (CryptoService.unlock -> Argon2id -> KEK -> unwrap master key -> DPAPI
-   session ticket), then immediately cleared.  Auto-lock is driven by
+   app body (startup) and after an idle auto-lock.  ANY non-empty password is
+   accepted - it is only a key source: the password never unlocks every file,
+   it only derives the keys of the files that match it.  The password is never
+   kept in JS/UI state: it is typed into the field, POSTed to
+   /api/aimg/unlock (CryptoService.unlock -> Argon2id password key -> DPAPI
+   sealed session), then immediately cleared.  Auto-lock is driven by
    /api/session/status polling; heartbeats come from real user activity.
    ========================================================================== */
 
@@ -90,7 +92,7 @@ async function attemptLogin() {
          login: the viewer resumes from the folder the user was on). */
       if (state.path) openFolder(state.path, { history: false });
     } else {
-      if (loginStatusEl) loginStatusEl.textContent = data.error || 'Password salah.';
+      if (loginStatusEl) loginStatusEl.textContent = data.error || 'Tidak dapat membuka session.';
       session.unlocked = false;
     }
   } catch (err) {
@@ -108,8 +110,8 @@ function stopSessionPolling() {
 }
 
 /* Poll /api/session/status.  When the backend reports the idle timeout has
-   elapsed (should_lock), the UI calls /api/session/lock (which drops the
-   master key server-side) and re-shows the login overlay. */
+   elapsed (should_lock), the UI calls /api/session/lock (which wipes the
+   session key material server-side) and re-shows the login overlay. */
 function pollSessionStatus() {
   stopSessionPolling();
   /* Don't poll while the login overlay is already shown: there is nothing to
@@ -122,7 +124,7 @@ function pollSessionStatus() {
     var data = (res && res.data) || {};
     if (typeof data.idle_timeout === 'number') session.idleTimeout = data.idle_timeout;
     if (data.should_lock) {
-      /* Backend says idle elapsed: lock now (drops master key + caches). */
+      /* Backend says idle elapsed: lock now (wipes session key + caches). */
       return postJSON('/api/session/lock', {}).then(function () {
         session.unlocked = false;
         setCryptoStatus({ unlocked: false, initialized: data.initialized });

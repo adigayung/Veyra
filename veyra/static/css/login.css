@@ -1,0 +1,116 @@
+/* ==========================================================================
+   Veyra — login.css
+   Centralized login overlay (startup + idle auto-lock).  Password-only,
+   shown on top of the mounted app body so an auto-lock never destroys the
+   user's navigation/selection state.
+   ========================================================================== */
+
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(900px 520px at 50% 0%, rgba(77, 141, 255, 0.09), transparent 62%),
+    #050607;
+}
+
+.login-overlay.hidden {
+  display: none;
+}
+
+.login-box {
+  width: 316px;
+  padding: 30px 26px 24px;
+  background: linear-gradient(180deg, #14171c, #0d0f12);
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-3);
+  box-shadow: var(--shadow-3);
+}
+
+.login-box h1 {
+  margin: 0 0 6px;
+  font-size: 27px;
+  font-weight: 600;
+  letter-spacing: 5px;
+  text-align: center;
+  color: var(--text-0);
+}
+
+.login-box .login-sub {
+  margin: 0 0 22px;
+  font-size: 11.5px;
+  text-align: center;
+  color: var(--text-2);
+}
+
+.login-box label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.login-box input[type="password"] {
+  width: 100%;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-1);
+  background: var(--bg-0);
+  color: var(--text-0);
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+
+.login-box input[type="password"]::placeholder {
+  color: var(--text-3);
+}
+
+.login-box input[type="password"]:focus {
+  outline: none;
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.login-box button {
+  width: 100%;
+  height: 38px;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-1);
+  background: linear-gradient(180deg, var(--accent-2), var(--accent));
+  color: #06101f;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter var(--t-fast), opacity var(--t-fast);
+}
+
+.login-box button:hover {
+  filter: brightness(1.07);
+}
+
+.login-box button:disabled {
+  opacity: 0.5;
+  cursor: default;
+  filter: none;
+}
+
+.login-box .login-status {
+  min-height: 15px;
+  margin-top: 12px;
+  font-size: 11.5px;
+  text-align: center;
+  color: var(--danger);
+}
+
+.login-box .login-hint {
+  margin-top: 8px;
+  font-size: 10.5px;
+  text-align: center;
+  color: var(--text-3);
+}

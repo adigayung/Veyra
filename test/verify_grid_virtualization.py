@@ -41,7 +41,17 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-HTML_PATH = ROOT / "veyra" / "index.html"
+sys.path.insert(0, str(ROOT / "test"))
+
+import verify_ui_sources as ui  # noqa: E402
+
+HTML_PATH = ui.HTML_PATH
+
+#: The real shipped sources executed by the Node harnesses / audited statically.
+GRID_JS = ui.js_for("modules/grid", "modules/sort")
+VIEWER_JS = ui.js_for("modules/viewer")
+UI_JS = ui.ui_source()
+CSS = ui.ui_css()
 
 FAILS: list[str] = []
 
@@ -54,16 +64,6 @@ def check(cond: bool, label: str) -> None:
 
 def section(title: str) -> None:
     print("\n== " + title + " ==")
-
-
-def _extract(html: str, start_token: str, end_token: str) -> str:
-    start = html.find(start_token)
-    if start < 0:
-        return ""
-    end = html.find(end_token, start + len(start_token))
-    if end <= start:
-        return ""
-    return html[start:end]
 
 
 # --------------------------------------------------------------------------- #
@@ -119,7 +119,11 @@ const gridEl = {
   querySelectorAll(sel) { return sel === '.card' ? currentCards : []; },
 };
 
-const els = {
+// PRELUDE-ONLY: the real `els` binding (and `state` + the grid constants) come
+// from core/state.js, concatenated right after this prelude.  Only the handles
+// the harness actually observes are stubbed; core/state.js then REPLACES this
+// object, so the assertions read the real module's state.
+var els = {
   grid: gridEl,
   statusFile: { textContent: '' }, statusFolders: { textContent: '' },
   statusFiles: { textContent: '' }, selectedStatus: { textContent: '' },
@@ -130,16 +134,16 @@ const document = {
   createElement(tag) {
     return { tagName: tag, className: '', id: '', style: {}, appendChild() {}, querySelector() { return null; } };
   },
+  querySelector() { return null; },
+  querySelectorAll() { return []; },
   getElementById(id) {
+    if (id === 'grid') return gridEl;
     if (id === 'gridInner') return innerEl;
     if (id === 'gridTop') return topPad;
     if (id === 'gridBottom') return bottomPad;
     return null;
   },
 };
-
-const state = { path: null, images: [], dirs: [], selected: null, selection: [], anchor: null,
-                crypto: { unlocked: false } };
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
   return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
@@ -310,40 +314,42 @@ def run_node_harness(prelude: str, consts: str, block: str, assertions: str) -> 
 
 
 def main() -> int:
-    html = HTML_PATH.read_text(encoding="utf-8")
+    html = UI_JS                     # shell + modules (wiring audit)
+    grid_js = ui.js_for("modules/grid")     # the Image Grid module
+    sort_js = ui.js_for("modules/sort")     # the Sort By module
+    core_js = ui.js_for("core")             # constants live in core/state.js
+    grid_block = grid_js
+    grid_consts = core_js
+    fullscreen_block = VIEWER_JS
 
-    grid_block = _extract(html, "// -- virtualized grid", "// -- sidebar tree")
-    grid_consts = _extract(html, "var GRID_MIN=142", "// -- small helpers")
-    fullscreen_block = _extract(html, "// -- full screen viewer", "// -- right click context menu")
-
-    section("1. Algorithm wiring present in veyra/index.html")
-    check("GRID_WINDOW_RADIUS=30" in grid_consts, "render radius is 30 items")
-    check("GRID_SCROLL_DEBOUNCE=250" in grid_consts, "scroll debounce is 250 ms")
+    section("1. Algorithm wiring present in the Image Grid module")
+    check("GRID_WINDOW_RADIUS = 30" in grid_consts, "render radius is 30 items")
+    check("GRID_SCROLL_DEBOUNCE = 250" in grid_consts, "scroll debounce is 250 ms")
     for token in (
         "function computeCenterIndex(",
         "function renderWindow(",
         "function onGridScroll(",
         "function applyScrollWindow(",
     ):
-        check(token in grid_block, f"grid block defines {token}")
-    check("Math.max(0,center-GRID_WINDOW_RADIUS)" in grid_block
-          and "Math.min(total-1,center+GRID_WINDOW_RADIUS)" in grid_block,
+        check(token in grid_block, f"grid module defines {token}")
+    check("Math.max(0, center - GRID_WINDOW_RADIUS)" in grid_block
+          and "Math.min(total - 1, center + GRID_WINDOW_RADIUS)" in grid_block,
           "renderWindow mounts exactly centerIndex +/- 30")
-    check("start=Math.max(0,center-GRID_WINDOW_RADIUS)" in grid_block.replace(" ", ""),
+    check("start = Math.max(0, center - GRID_WINDOW_RADIUS)" in grid_block,
           "window starts at centerIndex - 30")
 
     section("2. Scroll is debounced (no per-event re-render)")
-    check("gridLayout.scrollTimer=setTimeout(applyScrollWindow,GRID_SCROLL_DEBOUNCE)" in grid_block,
+    check("setTimeout(applyScrollWindow, GRID_SCROLL_DEBOUNCE)" in grid_block,
           "a scroll event only arms the debounce timer")
     check("clearTimeout(gridLayout.scrollTimer)" in grid_block,
           "every further scroll event resets (cancels) the timer")
-    check("els.grid.onscroll=onGridScroll;" in grid_block,
+    check("els.grid.onscroll = onGridScroll;" in grid_block,
           "the grid scroll handler is the debounced onGridScroll")
-    check("onscroll=function(){layoutGrid();}" not in html and "function layoutGrid(" not in html,
+    check("layoutGrid" not in html,
           "the old per-scroll re-render cascade is gone")
 
     section("3. Direct jump decision")
-    check("if(gridLayout.winStart>=0&&center>=gridLayout.winStart&&center<=gridLayout.winEnd){return;}" in grid_block,
+    check("if (gridLayout.winStart >= 0 && center >= gridLayout.winStart && center <= gridLayout.winEnd) { return; }" in grid_block,
           "no re-render when the centre is still inside the active window")
 
     section("4. Bounded DOM + lazy loading preserved")
@@ -354,17 +360,17 @@ def main() -> int:
           "ensureVisible mounts the window around an off-window selection")
 
     section("5. Image View / fullscreen untouched")
-    check(fullscreen_block != "", "the View-Image block is still present")
+    check(fullscreen_block != "", "the View-Image module is present")
     for token in (
         "function fsSetMode(", "function fsToggleMode(", "function fsClamp(",
         "function fsZoom(", "function fsApply(", "fsImg.addEventListener('dblclick'",
         "fsView.addEventListener('wheel'",
     ):
-        check(token in fullscreen_block, f"View-Image block still defines/wires {token}")
+        check(token in fullscreen_block, f"View-Image module still defines/wires {token}")
 
     section("6. runtime behaviour of the real grid code (Node, 10.000 items)")
     prelude, consts, block, assertions = NODE_PRELUDE, grid_consts, grid_block, NODE_ASSERTIONS
-    check(consts != "" and block != "", "grid constants + block extracted from index.html")
+    check(consts != "" and block != "", "grid constants + module loaded from the shipped sources")
     ok = run_node_harness(prelude, consts, block, assertions)
     check(ok, "the shipped grid virtualisation passes every runtime assertion")
 

@@ -1,0 +1,338 @@
+/* ==========================================================================
+   Veyra — layout.css
+   The application shell: the vertical chrome (menu / toolbar / address bar /
+   body / status bar) and the two-column body (sidebar + viewer).
+   ========================================================================== */
+
+.app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-0);
+  color: var(--text-0);
+}
+
+/* -- menu strip ----------------------------------------------------------- */
+.menu {
+  height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 0 6px;
+  background: var(--bg-0);
+  border-bottom: 1px solid var(--line-0);
+  -webkit-app-region: drag;
+}
+
+.menu span {
+  padding: 3px 10px;
+  border-radius: var(--r-1);
+  font-size: 12px;
+  color: var(--text-1);
+  cursor: default;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+
+.menu span:hover {
+  background: var(--bg-3);
+  color: var(--text-0);
+}
+
+/* -- toolbar -------------------------------------------------------------- */
+.toolbar {
+  height: var(--toolbar-h);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 10px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line-0);
+}
+
+.toolbar .spacer {
+  flex: 1;
+}
+
+.tool {
+  height: 32px;
+  min-width: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--r-1);
+  background: transparent;
+  color: var(--text-1);
+  font-size: 15px;
+  cursor: pointer;
+  transition: background var(--t-fast), border-color var(--t-fast),
+    color var(--t-fast);
+}
+
+.tool:hover,
+.tool.active {
+  background: var(--bg-3);
+  border-color: var(--line-1);
+  color: var(--accent-2);
+}
+
+.tool:active {
+  background: var(--bg-4);
+}
+
+.sep {
+  width: 1px;
+  height: 22px;
+  margin: 0 6px;
+  background: var(--line-1);
+}
+
+/* Compact controls that sit inline in the toolbar (zoom / sort / group). */
+.zoom,
+.sortby,
+.groupfilter {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-1);
+  background: var(--bg-2);
+  color: var(--text-0);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+
+.zoom:hover,
+.sortby:hover,
+.groupfilter:hover {
+  border-color: var(--line-2);
+  background: var(--bg-3);
+}
+
+.zoom:focus,
+.sortby:focus,
+.groupfilter:focus {
+  outline: none;
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.zoom {
+  width: 74px;
+}
+
+.sortby {
+  max-width: 176px;
+}
+
+.groupfilter {
+  max-width: 168px;
+}
+
+.sortby-label,
+.groupfilter-label {
+  margin: 0 2px 0 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+/* -- address bar ---------------------------------------------------------- */
+.address {
+  height: var(--address-h);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line-0);
+}
+
+.nav {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-1);
+  background: var(--bg-2);
+  color: var(--text-1);
+  font-size: 15px;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast),
+    border-color var(--t-fast);
+}
+
+.nav:hover {
+  background: var(--bg-3);
+  border-color: var(--line-2);
+  color: var(--text-0);
+}
+
+.nav:active {
+  background: var(--bg-4);
+}
+
+.path {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 11px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-1);
+  background: var(--bg-2);
+  color: var(--text-0);
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+
+.path:focus-within {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.path b {
+  font-size: 12px;
+  opacity: 0.9;
+}
+
+.path-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+}
+
+.path-input::placeholder {
+  color: var(--text-3);
+}
+
+/* -- body / sidebar / viewer --------------------------------------------- */
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.sidebar {
+  width: var(--sidebar-w);
+  flex: 0 0 var(--sidebar-w);
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-1);
+  border-right: 1px solid var(--line-0);
+}
+
+.viewer {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-0);
+}
+
+/* Section header shared by the explorer / groups panels. */
+.panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 1.1px;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.view-head {
+  height: 36px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line-0);
+  color: var(--text-1);
+  font-size: 12px;
+}
+
+.view-head .count {
+  margin-left: auto;
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+/* -- status bar ----------------------------------------------------------- */
+.status {
+  height: var(--status-h);
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  background: var(--bg-1);
+  border-top: 1px solid var(--line-0);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-1);
+}
+
+.status div {
+  padding: 0 12px;
+  border-right: 1px solid var(--line-0);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status div:last-child {
+  border-right: 0;
+}
+
+.status .file {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-0);
+}
+
+.status .pill {
+  color: var(--text-2);
+}
+
+/* -- responsive ----------------------------------------------------------- */
+@media (max-width: 1180px) {
+  :root {
+    --sidebar-w: clamp(208px, 24vw, 240px);
+  }
+
+  .sortby-label,
+  .groupfilter-label {
+    display: none;
+  }
+}
+
+@media (max-width: 980px) {
+  .zoom,
+  .sortby,
+  .groupfilter {
+    max-width: 118px;
+  }
+
+  :root {
+    --sidebar-w: clamp(200px, 26vw, 224px);
+  }
+}

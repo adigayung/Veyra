@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import struct
 import sys
@@ -226,10 +227,22 @@ def main() -> int:  # noqa: C901 - a verification script is intentionally linear
 
     # -- UI wiring ---------------------------------------------------------
     section("10. UI declares the full context-menu structure + wiring")
-    html = (Path(__file__).resolve().parent / "veyra" / "index.html").read_text(encoding="utf-8")
+    # The frontend is modular: the shell loads the sources from /static/js, so
+    # the audit concatenates the shell with every loaded module.
+    shell = (Path(__file__).resolve().parent / "veyra" / "index.html").read_text(encoding="utf-8")
+    static_root = Path(__file__).resolve().parent / "veyra" / "static"
+    parts = [shell]
+    for src in re.findall(r'<script\s+src="([^"]+)"', shell):
+        rel = src.lstrip("/")
+        if rel.startswith("static/"):
+            rel = rel[len("static/"):]
+        asset = static_root / rel
+        if asset.is_file():
+            parts.append(asset.read_text(encoding="utf-8"))
+    html = "\n".join(parts)
     # Scope the ordering check to the context-menu definition block so tokens
     # that also exist elsewhere (e.g. "Tools" in the top menu bar) don't skew it.
-    block_start = html.find("ctxMenu.className='ctx-menu'")
+    block_start = html.find("ctxMenu.className = 'ctx-menu'")
     block_end = html.find("document.body.appendChild(ctxMenu);", block_start)
     block = html[block_start:block_end] if block_start >= 0 and block_end > block_start else ""
 
@@ -280,15 +293,17 @@ def main() -> int:  # noqa: C901 - a verification script is intentionally linear
 
     # context-aware visibility of Encrypt/Decrypt
     check(
-        "sel.every(function(x){return !x.encrypted;})" in html
-        and "sel.every(function(x){return x.encrypted;})" in html,
+        "sel.every(function (x) { return !x.encrypted; })" in html
+        and "sel.every(function (x) { return x.encrypted; })" in html,
         "Encrypt/Decrypt visibility is context aware (plain vs .aimg)",
     )
     check("__CTX__" not in html, "no placeholder left behind")
 
     served = client.get("/").data.decode("utf-8")
-    check("ctx-item" in served and "/api/files/copy" in served,
-          "served UI ships the context menu + live file-op calls")
+    check("menu-row" in html and "/api/files/copy" in html,
+          "UI ships the context menu + live file-op calls")
+    check("/static/js/modules/contextmenu.js" in served,
+          "served UI loads the context-menu module")
 
     # -- summary -----------------------------------------------------------
     print("\n" + "=" * 64)

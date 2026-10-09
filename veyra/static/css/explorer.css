@@ -1,0 +1,306 @@
+/* ==========================================================================
+   Veyra — explorer.css
+   File Explorer panel (This PC -> drives -> folders, lazily expanded).
+   Reworked for a clean, premium dark look consistent with the rest of Veyra.
+   ========================================================================== */
+
+/* ---- panel shell -------------------------------------------------------- */
+.explorer {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* The sidebar now holds ONLY the File Explorer, so it owns the full panel
+     height.  The former top border (which separated it from the stacked Groups
+     panel) is gone - the address bar above already draws that hairline. */
+  background:
+    linear-gradient(180deg,
+      rgba(20, 23, 28, 0.55) 0%,
+      rgba(13, 15, 18, 0) 24%),
+    var(--bg-1);
+}
+
+.explorer-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px 10px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-2);
+  user-select: none;
+}
+
+.explorer-head .explorer-head-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+  flex: 0 0 auto;
+}
+
+.explorer-head .explorer-head-meta {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-2);
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explorer-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  /* Reserve the scrollbar gutter so rows never jump horizontally the moment
+     the tree grows past the panel height. */
+  scrollbar-gutter: stable;
+  padding: 2px 10px 14px;
+}
+
+/* ---- tree ---------------------------------------------------------------- */
+.tree,
+.tree ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* The tree is drawn on a HORIZONTALLY scrollable canvas: it sizes to the width
+   of its widest row (long folder names / deep indentation) so the full label is
+   reachable by scrolling sideways instead of being clipped with an ellipsis.
+   ``min-width: 100%`` keeps a short tree filling the panel, so the horizontal
+   scrollbar only appears when the content actually exceeds the panel and never
+   steals space otherwise - mirroring the vertical scrollbar in .explorer-body. */
+.tree {
+  width: max-content;
+  min-width: 100%;
+}
+
+/* A node is a WRAPPING block: its first line is the row (twisty + icon + label)
+   and a nested <ul> drops to its own full-width line below.  Without the wrap
+   the child list was laid out as a horizontal sibling of the label, which made
+   the whole tree overflow the sidebar and overlap every row. */
+.tree li {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  margin: 1px 0;
+  padding: 0 6px 0 8px;
+  border-radius: var(--r-1);
+  color: var(--text-1);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--t-fast);
+}
+
+/* Nested list: always a full-width block on its own line, indented with a
+   hairline guide so the depth reads clearly. */
+.tree li > ul {
+  flex: 0 0 100%;
+  width: 100%;
+  min-width: 0;
+  margin: 1px 0 2px;
+  padding-left: 12px;
+  border-left: 1px dashed rgba(39, 45, 54, 0.9);
+}
+
+/* Row highlight + selection are drawn by a single-row pill so they never bleed
+   into the node's children (a plain `li` background would tint the subtree). */
+.tree li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 26px;
+  border-radius: var(--r-1);
+  background: transparent;
+  pointer-events: none;
+  z-index: 0;
+  transition: background var(--t-fast), box-shadow var(--t-fast);
+}
+
+.tree li:hover::before {
+  background: var(--bg-3);
+}
+
+/* Hovering a descendant must not light up every ancestor: only the row the
+   pointer is actually over keeps the pill. */
+.tree li:has(> ul:hover)::before {
+  background: transparent;
+}
+
+.tree li.selected::before {
+  background: linear-gradient(90deg, var(--accent-dim),
+      rgba(77, 141, 255, 0.05) 70%, rgba(77, 141, 255, 0));
+  box-shadow: inset 0 0 0 1px rgba(77, 141, 255, 0.25);
+}
+
+.tree li:hover,
+.tree li.selected {
+  color: var(--text-0);
+}
+
+/* Left accent bar marks the selected node. */
+.tree li.selected::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 4px;
+  width: 2px;
+  height: 18px;
+  border-radius: 2px;
+  background: var(--accent-2);
+  z-index: 1;
+}
+
+/* Row content paints above the pill. */
+.tree li > .twisty,
+.tree li > .folder,
+.tree li > .label,
+.tree li > .drive-badge {
+  position: relative;
+  z-index: 1;
+}
+
+.tree li.selected .label {
+  font-weight: 500;
+}
+
+.tree li .label {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* No clipping / ellipsis: a long folder name must stay fully readable.  The
+     tree is a horizontally scrollable canvas (see the .tree width rule), so the
+     whole label is reachable by scrolling sideways rather than being cut off. */
+  white-space: nowrap;
+  font-size: 12.5px;
+  line-height: 1.3;
+}
+
+.tree li[data-kind='pc'] .label {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  color: var(--text-0);
+}
+
+.tree li[data-kind='drive'] .label {
+  font-size: 12.5px;
+}
+
+/* Drive badge: short, readable monospace token (C:, D:, ...). */
+.tree li .drive-badge {
+  flex: 0 0 auto;
+  min-width: 26px;
+  padding: 1px 5px;
+  border: 1px solid var(--line-1);
+  border-radius: 4px;
+  background: var(--bg-2);
+  font: 600 10px/1.4 var(--mono);
+  color: var(--text-1);
+  text-align: center;
+  letter-spacing: 0.5px;
+}
+
+.tree li:hover .drive-badge,
+.tree li.selected .drive-badge {
+  border-color: var(--accent-line);
+  color: var(--accent-2);
+}
+
+/* ---- twisty (expand / collapse) ------------------------------------------ */
+.twisty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Same 16px column as .folder so chevron / icon / label line up on every
+     row, at every depth.  A leaf keeps the empty box (no layout shift). */
+  width: 16px;
+  flex: 0 0 16px;
+  font-size: 10px;
+  color: var(--text-2);
+  user-select: none;
+  transition: color var(--t-fast), transform var(--t-med);
+}
+
+.twisty[data-open='1'] {
+  transform: rotate(90deg);
+  color: var(--text-1);
+}
+
+.tree li:hover .twisty,
+.tree li.selected .twisty {
+  color: var(--accent-2);
+}
+
+/* ---- icons ---------------------------------------------------------------- */
+.folder {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-1);
+  filter: saturate(0.95) brightness(1.05);
+}
+
+/* Drive / PC nodes carry a subtle tint so they read as "places". */
+.tree li[data-kind='pc'] .folder {
+  color: var(--accent-2);
+  font-size: 14px;
+}
+
+.tree li[data-kind='drive'] .folder {
+  color: var(--text-1);
+}
+
+.tree li.selected .folder {
+  color: var(--accent-2);
+}
+
+/* ---- error rows ------------------------------------------------------------ */
+.tree .tree-error {
+  color: var(--danger);
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* ---- scrollbar polish (scoped, so other panels keep their own look) ------ */
+.explorer-body {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-1) transparent;
+}
+
+.explorer-body::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.explorer-body::-webkit-scrollbar-thumb {
+  background: var(--line-1);
+  border-radius: 99px;
+}
+
+.explorer-body::-webkit-scrollbar-thumb:hover {
+  background: var(--line-2);
+}
+
+.explorer-body::-webkit-scrollbar-track {
+  background: transparent;
+}

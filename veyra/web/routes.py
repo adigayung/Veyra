@@ -53,6 +53,39 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 #: inside the package as ``veyra/index.html`` instead of the project root.
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
+#: Modular frontend assets (``veyra/static/css/*.css`` + ``veyra/static/js/*.js``)
+#: served through the explicit ``/static/css`` and ``/static/js`` routes below.
+STATIC_ROOT = PACKAGE_ROOT / "static"
+
+#: MIME types for the static asset routes (no dependency on ``mimetypes``).
+_STATIC_MIME_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+}
+
+
+def _serve_static(base: Path, asset: str | None) -> Response:
+    """Serve one file from ``base`` with a path-traversal guard.
+
+    Returns a plain 404 for anything that escapes ``base`` (``..``, absolute
+    paths, symlink tricks) so a crafted URL can never read arbitrary files.
+    """
+    if not asset:
+        return Response("Not found", status=404)
+    try:
+        # ``asset`` comes from a ``<path:...>`` segment, so it may contain
+        # slashes; resolve it *inside* the base and verify containment.
+        target = (base / asset).resolve()
+        if base.resolve() not in target.parents and target != base.resolve():
+            return Response("Not found", status=404)
+        if not target.is_file():
+            return Response("Not found", status=404)
+        content = target.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return Response("Not found", status=404)
+    mime = _STATIC_MIME_TYPES.get(target.suffix.lower(), "application/octet-stream")
+    return Response(content, content_type=mime)
+
 #: Folder opened when the viewer starts.  Falls back to the project root.
 DEFAULT_BROWSE_PATH = r"J:\Program AndroidX\b\ai\StableDiffusion\face\knl\Revi Lia"
 
@@ -60,6 +93,26 @@ DEFAULT_BROWSE_PATH = r"J:\Program AndroidX\b\ai\StableDiffusion\face\knl\Revi L
 #: it never touches the developer's real key store / folders).
 _KEYSTORE_ENV = "VEYRA_KEYSTORE"
 _DEFAULT_PATH_ENV = "VEYRA_DEFAULT_PATH"
+_IDLE_TIMEOUT_ENV = "VEYRA_IDLE_TIMEOUT"
+
+#: Default automatic session lock after 5 minutes of no keyboard/mouse
+#: activity (centralized login password == CryptoSession unlock password).
+_DEFAULT_IDLE_TIMEOUT = 300  # seconds
+
+
+def _idle_timeout() -> int:
+    """Return the automatic session-lock idle timeout in seconds (>= 0).
+
+    ``0`` disables auto-lock.  Overridable via ``VEYRA_IDLE_TIMEOUT`` so the
+    regression suite can exercise the 5-minute idle timeout quickly.
+    """
+    override = os.environ.get(_IDLE_TIMEOUT_ENV)
+    if override:
+        try:
+            return max(0, int(override))
+        except (TypeError, ValueError):
+            pass
+    return _DEFAULT_IDLE_TIMEOUT
 
 
 def _keystore_path() -> Path:
@@ -166,6 +219,62 @@ def _resolve_database(app: BetrayerApplication):
     return manager
 
 
+# ---------------------------------------------------------------------------
+# Centralized login session: idle auto-lock (5 minutes)
+# ---------------------------------------------------------------------------
+# The master password is never stored anywhere.  The only thing kept here is the
+# *wall clock* of the last keyboard/mouse activity reported by the UI; the
+# crypto session itself is enforced by ``CryptoService`` (DPAPI + Argon2id +
+# master-key verifier).  After 5 minutes of inactivity the UI calls
+# ``/api/session/lock`` which calls ``aimg_service.lock()`` (drops the master
+# key + clears every cached plaintext).  The login screen re-appears, the user
+# re-types the SAME password, and ``/api/aimg/unlock`` re-opens the session.
+#
+# Only the monotonic timestamp lives at module scope (shared by every route
+# handler); the crypto capability check uses the per-router ``aimg_service``.
+
+import time as _time
+
+#: Module-level idle activity clock shared by every router instance (only a
+#: monotonic timestamp lives here; the crypto capability is always re-checked
+#: against ``CryptoService`` via ``aimg_service``).  Tests that need to simulate
+#: a long idle period set ``VEYRA_IDLE_TIMEOUT`` to a small value and/or adjust
+#: ``veyra.web.routes._session_activity_ts`` directly.
+_session_activity_ts: float = _time.monotonic()
+
+
+def touch_session_activity() -> None:
+    """Record that keyboard/mouse activity happened "just now".
+
+    The UI pings ``/api/session/heartbeat`` on every keypress / pointer move;
+    each ping resets the idle countdown.  The login moment itself also touches
+    the clock so the auto-lock timer starts fresh after an unlock.
+    """
+    global _session_activity_ts
+    _session_activity_ts = _time.monotonic()
+
+
+def seconds_idle() -> float:
+    """Seconds since the last keyboard/mouse activity (monotonic clock)."""
+    return max(0.0, _time.monotonic() - _session_activity_ts)
+
+
+def _idle_elapsed(unlocked: bool) -> bool:
+    """Return ``True`` when the idle timeout elapsed (caller passes unlock).
+
+    Note: ``aimg_service`` is created by :func:`create_router`; when this helper
+    is used standalone (focused tests) ``unlocked`` is whatever the caller
+    already verified, so the module-level idle clock still works.
+    """
+    timeout = _idle_timeout()
+    if timeout <= 0:
+        return False
+    return unlocked and seconds_idle() >= float(timeout)
+
+
+
+
+
 def create_router(app: BetrayerApplication) -> WebRouter:
     """Create the web router with all Veyra routes."""
     router = WebRouter(name="veyra.web")
@@ -194,6 +303,16 @@ def create_router(app: BetrayerApplication) -> WebRouter:
             return Response.text(f"Error reading index.html: {exc}", status=500)
         return Response.html(content)
 
+    @router.get("/static/css/<path:asset>")
+    def static_css_handler(request, context) -> Response:
+        """Serve the modular stylesheets under ``veyra/static/css``."""
+        return _serve_static(STATIC_ROOT / "css", request.path_params.get("asset"))
+
+    @router.get("/static/js/<path:asset>")
+    def static_js_handler(request, context) -> Response:
+        """Serve the modular JavaScript modules under ``veyra/static/js``."""
+        return _serve_static(STATIC_ROOT / "js", request.path_params.get("asset"))
+
     @router.get("/api/health")
     def health_handler(request, context) -> Response:
         """Health check endpoint."""
@@ -205,7 +324,14 @@ def create_router(app: BetrayerApplication) -> WebRouter:
 
     @router.get("/api/config")
     def config_handler(request, context) -> Response:
-        """Expose the startup folder, supported extensions and crypto status."""
+        """Expose startup folder, extensions, crypto + central session state.
+
+        The centralized login screen (startup + auto-lock) uses the same
+        ``crypto`` state as the AIMG subsystem: there is exactly one password
+        and one unlock mechanism (``CryptoService.unlock``).  ``idle_timeout``
+        is the auto-lock interval the UI counts down, and ``session.required``
+        tells the UI the login screen must be shown before the app body.
+        """
         default_path = _default_path()
         return Response.json({
             "ok": True,
@@ -213,6 +339,11 @@ def create_router(app: BetrayerApplication) -> WebRouter:
             "tree_root": str(_tree_root(default_path)),
             "extensions": sorted(image_service.SUPPORTED_EXTENSIONS),
             "crypto": aimg_service.status(),
+            "session": {
+                "required": True,
+                "unlocked": aimg_service.is_unlocked(),
+                "idle_timeout": _idle_timeout(),
+            },
         })
 
     @router.get("/api/drives")
@@ -373,7 +504,13 @@ def create_router(app: BetrayerApplication) -> WebRouter:
 
     @router.post("/api/aimg/unlock")
     def aimg_unlock_handler(request, context) -> Response:
-        """Unlock the crypto session with the given password."""
+        """Unlock the crypto session with the given password.
+
+        This is the single login/unlock endpoint for the whole application:
+        the centralized startup login screen and the auto-lock re-login both
+        POST here with the master password, which unlocks CryptoService
+        (Argon2id -> KEK -> unwrap master key -> DPAPI session ticket).
+        """
         payload = request.get_json(default={}) or {}
         password = payload.get("password")
         if not isinstance(password, str) or not password:
@@ -386,6 +523,9 @@ def create_router(app: BetrayerApplication) -> WebRouter:
                 {"ok": False, "error": "Password salah."}, status=401)
         except CryptoError as exc:
             return Response.json({"ok": False, "error": str(exc)}, status=400)
+        # The session is live again: reset the idle activity clock so the
+        # auto-lock countdown starts fresh from this login moment.
+        touch_session_activity()
         return Response.json({"ok": True, **aimg_service.status()})
 
     @router.post("/api/aimg/lock")
@@ -393,6 +533,63 @@ def create_router(app: BetrayerApplication) -> WebRouter:
         """Lock the crypto session and drop all cached plaintext."""
         aimg_service.lock()
         return Response.json({"ok": True, **aimg_service.status()})
+
+    # -- centralized login session (startup login + 5-minute idle lock) ------
+    # One password, one unlock.  The login screen at startup and the re-login
+    # after an idle auto-lock both POST to /api/aimg/unlock above.  These
+    # endpoints only carry the idle-timer + status bookkeeping; the crypto
+    # capability itself is always re-checked against CryptoService (DPAPI +
+    # master-key verifier), never a client flag.
+    @router.post("/api/session/heartbeat")
+    def session_heartbeat_handler(request, context) -> Response:
+        """Reset the idle auto-lock clock (called on key/pointer activity).
+
+        Every keyboard / pointer event in the UI pings this endpoint, which
+        only refreshes the monotonic "last activity" timestamp used by
+        ``/api/session/status``.  No password or key material is exchanged.
+        """
+        touch_session_activity()
+        return Response.json({
+            "ok": True,
+            "unlocked": aimg_service.is_unlocked(),
+            "idle_seconds": seconds_idle(),
+            "idle_timeout": _idle_timeout(),
+        })
+
+    @router.get("/api/session/status")
+    def session_status_handler(request, context) -> Response:
+        """Report the live session state for the login screen / auto-lock.
+
+        ``should_lock`` tells the UI the idle timeout has elapsed and it must
+        lock now (the UI then calls ``/api/session/lock``); ``unlocked`` is the
+        real crypto capability (CryptoService.is_unlocked), never a client flag.
+        """
+        unlocked = aimg_service.is_unlocked()
+        return Response.json({
+            "ok": True,
+            "unlocked": unlocked,
+            "initialized": aimg_service.status().get("initialized", False),
+            "idle_seconds": seconds_idle(),
+            "idle_timeout": _idle_timeout(),
+            "should_lock": _idle_elapsed(unlocked),
+        })
+
+    @router.post("/api/session/lock")
+    def session_lock_handler(request, context) -> Response:
+        """Lock the session (manual lock or idle auto-lock).
+
+        Calls the same ``aimg_service.lock()`` as the Tools -> Lock button: it
+        drops the DPAPI session ticket, wipes the fallback key and clears every
+        cached plaintext, so ``.aimg`` access is refused again until the user
+        re-types the master password on the login screen.
+        """
+        aimg_service.lock()
+        return Response.json({
+            "ok": True,
+            "unlocked": False,
+            "idle_seconds": seconds_idle(),
+            "idle_timeout": _idle_timeout(),
+        })
 
     @router.post("/api/aimg/encrypt")
     def aimg_encrypt_handler(request, context) -> Response:

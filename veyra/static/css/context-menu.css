@@ -1,0 +1,35 @@
+/* ==========================================================================
+   Veyra — context-menu.css
+   Right-click menu.  Built dynamically in JS but rendered with the shared
+   .menu-row / .menu-sub primitives from base.css so it matches the rest of
+   the chrome.
+   ========================================================================== */
+
+.ctx-menu {
+  position: fixed;
+  z-index: 2000;
+  min-width: 214px;
+  padding: 5px 0;
+  display: none;
+  background: var(--bg-2);
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-2);
+  box-shadow: var(--shadow-3);
+  user-select: none;
+}
+
+.ctx-menu.show {
+  display: block;
+  animation: ctx-in var(--t-fast);
+}
+
+@keyframes ctx-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

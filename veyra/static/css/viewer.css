@@ -1,0 +1,73 @@
+/* ==========================================================================
+   Veyra — viewer.css
+   Image View / single image (fullscreen surface) + the toast notification.
+   The viewer is intentionally chrome-free: only the image is visible.
+   ========================================================================== */
+
+.fs-view {
+  position: fixed;
+  inset: 0;
+  z-index: 2500;
+  display: none;
+  overflow: hidden;
+  background: #000;
+}
+
+.fs-view.show {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Native fullscreen owns the window chrome; this surface owns only the image.
+   While it is active the whole application chrome (header/menu/toolbar/sidebar/
+   status) is removed so the image is the ONLY visible content. */
+body.fs-active {
+  background: #000;
+}
+
+body.fs-active .app {
+  display: none;
+}
+
+/* width/height 100% + object-fit:contain = fill the screen as much as possible
+   for both portrait and landscape while preserving the aspect ratio (no
+   stretch/distort, no padding/margin). */
+.fs-view img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform-origin: center center;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.fs-view img:active {
+  cursor: grabbing;
+}
+
+/* -- toast ---------------------------------------------------------------- */
+.toast {
+  position: fixed;
+  right: 18px;
+  bottom: 40px;
+  z-index: 3200;
+  padding: 10px 16px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-2);
+  background: rgba(20, 23, 28, 0.96);
+  color: var(--text-0);
+  font-size: 12px;
+  box-shadow: var(--shadow-2);
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+  transition: opacity var(--t-med), transform var(--t-med);
+}
+
+.toast.show {
+  opacity: 1;
+  transform: none;
+}

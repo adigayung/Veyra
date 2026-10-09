@@ -24,7 +24,12 @@ created in a temp workspace - that:
     (reconciled by identity).
  8. The UI declares the real Batch Rename dialog (not a placeholder), the
     Delete wiring and the keyboard guards.
- 9. Every inline <script> in index.html is valid JavaScript (``node --check``).
+ 9. Every frontend JavaScript file (shell + modules) is valid JavaScript
+    (``node --check``).
+
+The frontend was refactored from a single ``veyra/index.html`` into a shell
+(``index.html``) plus modular ``veyra/static/css`` / ``veyra/static/js`` assets,
+so the UI checks concatenate the shell with the loaded module sources.
 """
 
 from __future__ import annotations
@@ -83,15 +88,31 @@ def png_bytes(rgb: tuple) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
 
 
+HTML_PATH = Path(__file__).resolve().parent / "veyra" / "index.html"
+STATIC_ROOT = Path(__file__).resolve().parent / "veyra" / "static"
+
+
+def _ui_html() -> str:
+    """Return the UI shell + every frontend asset the shell loads.
+
+    The frontend is modular (``index.html`` shell + ``veyra/static/js`` modules),
+    so UI wiring checks must look at the concatenation of all loaded sources.
+    """
+    shell = HTML_PATH.read_text(encoding="utf-8")
+    scripts = re.findall(r'<script\s+src="([^"]+)"', shell)
+    parts = [shell]
+    for src in scripts:
+        rel = src.lstrip("/")
+        if rel.startswith("static/"):
+            rel = rel[len("static/"):]
+        asset = STATIC_ROOT / rel
+        if asset.is_file():
+            parts.append(asset.read_text(encoding="utf-8"))
+    return "\n".join(parts)
+
+
 def j(resp):
     return json.loads(resp.data.decode("utf-8"))
-
-
-HTML_PATH = Path(__file__).resolve().parent / "veyra" / "index.html"
-
-
-def read_html() -> str:
-    return HTML_PATH.read_text(encoding="utf-8")
 
 
 def main() -> int:  # noqa: C901 - a verification script is intentionally linear
@@ -260,7 +281,7 @@ def main() -> int:  # noqa: C901 - a verification script is intentionally linear
 
     # ------------------------------------------------------------ UI wiring
     section("8. UI ships the real Batch Rename dialog + Delete + clipboard wiring")
-    html = read_html()
+    html = _ui_html()
     for token in (
         # batch rename dialog (real, not a placeholder)
         'function openBatchRenameDialog',
@@ -277,7 +298,7 @@ def main() -> int:  # noqa: C901 - a verification script is intentionally linear
         "'/api/files/delete'",
         'function removeSelectedFiles',
         'data-act="remove"',
-        "e.key==='Delete'",
+        "e.key === 'Delete'",
         # clipboard (internal state)
         'function setClipboard',
         'function pasteClipboard',
@@ -285,14 +306,14 @@ def main() -> int:  # noqa: C901 - a verification script is intentionally linear
         "setClipboard('copy')",
         "setClipboard('cut')",
         'pasteClipboard()',
-        "e.key==='c'",
-        "e.key==='x'",
-        "e.key==='v'",
+        "(e.key === 'c' || e.key === 'C')",
+        "(e.key === 'x' || e.key === 'X')",
+        "(e.key === 'v' || e.key === 'V')",
         # keyboard guards
         'function isEditableTarget',
         'function anyDialogVisible',
     ):
-        check(token in html, f"index.html wires {token}")
+        check(token in html, f"UI wires {token}")
 
     check("navigator.clipboard" not in html,
           "file clipboard is Veyra internal state (no navigator.clipboard)")
@@ -303,38 +324,53 @@ def main() -> int:  # noqa: C901 - a verification script is intentionally linear
     check(html.count("function apiRemoveFiles") == 1,
           "exactly one apiRemoveFiles definition (no duplicate)")
 
+    # The shell is intentionally thin now; the served UI must reference every
+    # modular asset so the browser loads the real logic from disk.
     served = client.get("/").data.decode("utf-8")
-    check("/api/files/batch-rename" in served and 'id="batchPreview"' in served,
-          "served UI ships the live Batch Rename dialog")
-    check("/api/files/delete" in served and "removeSelectedFiles" in served,
-          "served UI ships the Delete action")
+    for src in re.findall(r'<script\s+src="([^"]+)"', served):
+        asset = client.get(src)
+        check(asset.status_code == 200,
+              f"served asset {src} -> HTTP {asset.status_code}")
+    for href in re.findall(r'<link\s+rel="stylesheet"\s+href="([^"]+)"', served):
+        asset = client.get(href)
+        check(asset.status_code == 200,
+              f"served stylesheet {href} -> HTTP {asset.status_code}")
+    check("/api/files/batch-rename" in html and 'id="batchPreview"' in html,
+          "UI ships the live Batch Rename dialog")
+    check("/api/files/delete" in html and "removeSelectedFiles" in html,
+          "UI ships the Delete action")
 
     # ------------------------------------------------------- JS syntax check
-    section("9. Inline JavaScript is syntactically valid (node --check)")
+    section("9. Frontend JavaScript is syntactically valid (node --check)")
     node = shutil.which("node")
     if not node:
         check(False, "node executable available for the JS syntax check")
     else:
-        blocks = re.findall(r"<script>(.*?)</script>", html, re.S)
-        check(bool(blocks), "index.html contains an inline <script> block")
+        shell = HTML_PATH.read_text(encoding="utf-8")
+        script_srcs = re.findall(r'<script\s+src="([^"]+)"', shell)
+        inline = re.findall(r"<script>(.*?)</script>", shell, re.S)
+        check(bool(script_srcs), "index.html loads external module <script> files")
+        check(len(re.findall(r"<script>", shell)) == 0
+              and len(re.findall(r"<script\s+src=", shell)) == len(script_srcs),
+              "index.html has no inline <script> logic left")
+        js_files = []
+        for src in script_srcs:
+            rel = src.lstrip("/")
+            if rel.startswith("static/"):
+                rel = rel[len("static/"):]
+            asset = STATIC_ROOT / rel
+            check(asset.is_file(), f"module exists on disk: {src}")
+            if asset.is_file():
+                js_files.append(asset)
         ok = True
-        for index, code in enumerate(blocks, 1):
-            fd, path = tempfile.mkstemp(suffix=".js", dir=str(WORK))
-            os.close(fd)
-            try:
-                Path(path).write_text(code, encoding="utf-8")
-                res = subprocess.run([node, "--check", path],
-                                     capture_output=True, text=True)
-                if res.returncode != 0:
-                    ok = False
-                    print("    node --check script #%d failed:\n%s"
-                          % (index, res.stderr.strip()[:400]))
-            finally:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
-        check(ok, "every inline <script> passes node --check (valid JavaScript)")
+        for path in js_files:
+            res = subprocess.run([node, "--check", str(path)],
+                                 capture_output=True, text=True)
+            if res.returncode != 0:
+                ok = False
+                print("    node --check %s failed:\n%s"
+                      % (path.name, res.stderr.strip()[:400]))
+        check(ok and bool(js_files), "every frontend module passes node --check (valid JavaScript)")
 
     # ---------------------------------------------------------------- summary
     print("\n" + "=" * 64)

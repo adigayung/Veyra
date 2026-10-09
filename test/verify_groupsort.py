@@ -46,7 +46,20 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-HTML_PATH = ROOT / "veyra" / "index.html"
+sys.path.insert(0, str(ROOT / "test"))
+
+import verify_ui_sources as ui  # noqa: E402
+
+HTML_PATH = ui.HTML_PATH
+STATIC_ROOT = ui.STATIC_ROOT
+
+#: The frontend is modular now: UI audits run against the shell + modules, and
+#: the Node harnesses execute the REAL shipped sources.
+UI = ui.ui_source()                       # shell + every loaded module
+GRID_JS = ui.js_for("modules/grid")       # Image Grid module
+SORT_JS = ui.js_for("modules/sort")       # Sort By module
+GROUP_JS = ui.js_for("modules/group")     # Group filter module
+CORE_JS = ui.js_for("core")               # constants + shared helpers
 
 FAILS: list[str] = []
 
@@ -69,7 +82,6 @@ def _extract(html: str, start_token: str, end_token: str) -> str:
     if end <= start:
         return ""
     return html[start:end]
-
 
 # --------------------------------------------------------------------------- #
 # Node harness: run the REAL grid + sort + group-filter block with a DOM stub   #
@@ -122,7 +134,10 @@ const gridEl = {
   querySelectorAll(sel) { return sel === '.card' ? currentCards : []; },
 };
 
-const els = {
+// PRELUDE-ONLY stubs.  The REAL `state`, `els` and grid constants come from
+// core/state.js, which is concatenated right after this prelude (so they must
+// not be re-declared here - that would be a hard syntax error).
+var els = {
   grid: gridEl,
   sortBy: { value: 'name_asc', onchange: null },
   groupFilter: { innerHTML: '', value: '', onchange: null },
@@ -135,19 +150,23 @@ const document = {
   createElement(tag) {
     return { tagName: tag, className: '', id: '', style: {}, appendChild() {}, querySelector() { return null; } };
   },
+  querySelector() { return null; },
+  querySelectorAll() { return []; },
+  addEventListener() {},
   getElementById(id) {
+    if (id === 'grid') return gridEl;
     if (id === 'gridInner') return innerEl;
     if (id === 'gridTop') return topPad;
     if (id === 'gridBottom') return bottomPad;
+    // core/state.js resolves these from the shell; the toolbar selector and the
+    // status bar exist in the real app, so the harness provides them too
+    // (otherwise renderGroupFilter()/updateStatus() cannot run).
+    if (id === 'groupFilter') return { innerHTML: '', value: '', onchange: null };
+    if (id === 'statusFile' || id === 'statusFolders' || id === 'statusFiles'
+        || id === 'selectedStatus' || id === 'viewCount') return { textContent: '' };
     return null;
   },
 };
-
-const state = { path: null, images: [], rawImages: [], group: null, groupImages: [],
-                sort: 'name_asc', dirs: [], selected: null, selection: [], anchor: null,
-                crypto: { unlocked: false } };
-
-const groupsState = { list: [], selected: null, detail: null };
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
   return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
@@ -352,12 +371,11 @@ def run_node_harness(prelude: str, grid_consts: str, grid_block: str, group_bloc
 
 
 def main() -> int:
-    html = HTML_PATH.read_text(encoding="utf-8")
+    html = UI
 
-    grid_consts = _extract(html, "var GRID_MIN=142", "// -- small helpers")
-    grid_block = _extract(html, "// -- virtualized grid", "// -- sidebar tree")
-    group_block = _extract(html, "// -- group filter (Image Grid dataset selector)",
-                           "// -- multi selection helpers")
+    grid_consts = CORE_JS
+    grid_block = GRID_JS + "\n" + SORT_JS
+    group_block = GROUP_JS
 
     section("1. Group selector lives in the toolbar, right of Sort By")
     check('<select id="groupFilter"' in html, "a <select id=\"groupFilter\"> exists")
@@ -380,32 +398,32 @@ def main() -> int:
     for token in ("function renderGroupFilter(", "function selectGroupDataset(",
                   "function resetToNormalDataset(", "function applyGroupFilter(",
                   "function groupMemberToImage("):
-        check(token in group_block, f"group-filter block defines {token}")
+        check(token in group_block, f"group-filter module defines {token}")
     check("renderGroupFilter();" in html, "loadGroups refreshes the Group selector")
 
     section("3. Normal / Group -> Sort pipeline")
     check("function activeSource(" in grid_block and "function rebuildImages(" in grid_block,
           "the active-source + rebuild pipeline is present")
-    check("if(state.group!=null){state.images=sortImages(activeSource(),state.sort||'name_asc');}" in html,
+    check("if (state.group != null) { state.images = sortImages(activeSource(), state.sort || 'name_asc'); }" in html,
           "openFolder keeps the active group dataset (Normal listing never leaks in)")
-    check("state.images=sortImages(state.rawImages,state.sort||'name_asc');" in html,
+    check("state.images = sortImages(state.rawImages, state.sort || 'name_asc');" in html,
           "the Normal listing is still sorted into state.images (regression guard)")
-    check("group:null" in html and "groupImages:[]" in html,
+    check("group: null" in html and "groupImages: []" in html,
           "state tracks the active group + its member images")
-    check("els.sortBy.onchange=function(){applySortBy(this.value);}" in html,
+    check("els.sortBy.onchange = function () { applySortBy(this.value); }" in html,
           "Sort By still re-sorts the active dataset")
 
     section("4. Image-View wheel walks the ordered list the right way")
-    wheel = re.search(r"fsView\.addEventListener\('wheel'.*?\},\{passive:false\}\);", html, re.S)
+    wheel = re.search(r"fsView\.addEventListener\('wheel'.*?\},\s*\{ passive: false \}\);", html, re.S)
     check(wheel is not None, "the Image-View wheel handler is present")
-    check(wheel is not None and "if(e.deltaY>0)fsStep(1);else fsStep(-1);" in wheel.group(0),
+    check(wheel is not None and "if (e.deltaY > 0) fsStep(1); else fsStep(-1);" in wheel.group(0),
           "wheel DOWN -> next (fsStep(1)); wheel UP -> previous (fsStep(-1))")
     check(".sort(" not in (wheel.group(0) if wheel else ""),
           "the wheel does not re-sort: it follows the active ordered list")
 
     section("5. runtime behaviour of the real grid + sort + group code (Node)")
     check(grid_consts != "" and grid_block != "" and group_block != "",
-          "grid + sort + group-filter blocks extracted from index.html")
+          "grid + sort + group-filter modules loaded from the shipped sources")
     ok = run_node_harness(NODE_PRELUDE, grid_consts, grid_block, group_block, NODE_ASSERTIONS)
     check(ok, "the shipped Group-Filter + Sort behaviour passes every runtime assertion")
 

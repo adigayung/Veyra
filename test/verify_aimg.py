@@ -225,7 +225,7 @@ def main() -> int:
 
     check(client.get("/api/health").status_code == 200, "GET /api/health 200")
     r = client.get("/")
-    check(r.status_code == 200 and b"Web Image Viewer" in r.data, "GET / serves UI")
+    check(r.status_code == 200 and b"VEYRA" in r.data, "GET / serves UI")
     check(b'id="titleText"' not in r.data, "old title bar removed (desktop shell owns title)")
 
     status = j(client.get("/api/aimg/status"))

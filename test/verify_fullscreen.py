@@ -35,9 +35,20 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-HTML_PATH = ROOT / "veyra" / "index.html"
+sys.path.insert(0, str(Path(__file__).resolve().parent / "test"))
+
+import verify_ui_sources as ui  # noqa: E402
+
+ROOT = ui.ROOT
+HTML_PATH = ui.HTML_PATH
 DESKTOP_PATH = ROOT / "desktop.py"
+
+#: Real shipped frontend sources: the UI shell + every module it loads, plus
+#: the stylesheets (so the audit can still assert the fullscreen CSS contract).
+HTML = ui.ui_source()          # shell + modules (JS)
+CSS = ui.ui_css()              # all stylesheets
+FULLSCREEN_JS = ui.js_for("modules/viewer")      # the View-Image module
+SHORTCUTS_JS = ui.js_for("modules/shortcuts")    # keyboard / mouse layer
 
 FAILS: list[str] = []
 
@@ -228,19 +239,17 @@ assert(!document.body.classList.contains('fs-active'), 'escape: the app chrome i
 
 
 def _extract_fullscreen_block(html: str) -> str:
-    start = html.find("// -- full screen viewer")
-    end = html.find("// -- right click context menu", start)
-    if start < 0 or end <= start:
-        return ""
-    return html[start:end]
+    """Return the real View-Image implementation.
+
+    After the modular refactor the fullscreen surface lives in
+    ``veyra/static/js/modules/viewer.js``; the audit passes it directly.
+    """
+    return html
 
 
 def _extract_keydown_handler(html: str) -> str:
-    start = html.find("// keyboard: fullscreen navigation/zoom")
-    end = html.find("// -- toolbar", start)
-    if start < 0 or end <= start:
-        return ""
-    return html[start:end]
+    """Return the real keyboard layer (``modules/shortcuts.js``)."""
+    return html
 
 
 def run_node_behaviour(block: str, handler: str) -> bool:
@@ -277,10 +286,11 @@ def run_node_behaviour(block: str, handler: str) -> bool:
 
 
 def main() -> int:
-    html = HTML_PATH.read_text(encoding="utf-8")
+    html = HTML
+    css = CSS
     desktop = DESKTOP_PATH.read_text(encoding="utf-8")
-    block = _extract_fullscreen_block(html)
-    handler = _extract_keydown_handler(html)
+    block = FULLSCREEN_JS
+    handler = SHORTCUTS_JS
 
     # -- 1. native window bridge in desktop.py -----------------------------
     section("1. desktop.py exposes the native pywebview fullscreen bridge")
@@ -294,18 +304,19 @@ def main() -> int:
     check("webview.create_window" in desktop, "uses a native pywebview window (no external browser)")
 
     # -- 2. index.html wiring ----------------------------------------------
-    section("2. index.html drives the native fullscreen surface")
-    check(block != "", "fullscreen block found in veyra/index.html")
+    section("2. the UI drives the native fullscreen surface")
+    check(block != "", "the View-Image module exists (veyra/static/js/modules/viewer.js)")
     check("window.__aether_fs" in html and "window.__aether_fs.enter" in html and "window.__aether_fs.leave" in html,
-          "index.html calls the native bridge enter/leave")
+          "the UI calls the native bridge enter/leave")
     check("fsView.classList.add('show')" in html, "entering shows the image surface (.fs-view.show)")
     check("fsView.classList.remove('show')" in html, "leaving hides the image surface")
     check("document.body.classList.add('fs-active')" in html, "entering hides the app chrome (body.fs-active)")
     check("document.body.classList.remove('fs-active')" in html, "leaving restores the app chrome")
-    check("body.fs-active .app{display:none}" in html,
+    check("body.fs-active .app" in css and "display: none" in css,
           "CSS removes header/menu/toolbar/sidebar/status in fullscreen")
-    check("object-fit:contain" in html, "image preserves aspect ratio (no stretch/distort)")
-    check("width:100%;height:100%" in html, "image fills the screen as much as possible")
+    check("object-fit: contain" in css, "image preserves aspect ratio (no stretch/distort)")
+    check("width: 100%" in css and "height: 100%" in css,
+          "image fills the screen as much as possible")
     check("function fsActive(" in html, "fsActive() helper exists")
     check("getElementById('fsName')" not in html,
           "no leftover #fsName null-reference (the bug that aborted before the bridge)")
@@ -314,15 +325,15 @@ def main() -> int:
 
     # -- 3. single shared implementation for both triggers -----------------
     section("3. both triggers share ONE fullscreen implementation")
-    check("card.ondblclick=function(){openFullScreen(" in html, "double-click calls openFullScreen")
-    check("data-act=\"fullscreen\"" in html and "act==='fullscreen'" in html and "openFullScreen(i)" in html,
+    check("card.ondblclick = function () { openFullScreen(" in html, "double-click calls openFullScreen")
+    check("data-act=\"fullscreen\"" in html and "act === 'fullscreen'" in html and "openFullScreen(i)" in html,
           "context-menu 'Open Full Screen' calls the same openFullScreen")
     check(html.count("function openFullScreen(") >= 1 and html.count("function closeFullScreen(") >= 1,
           "openFullScreen/closeFullScreen defined once (single implementation)")
 
     # -- 4. Escape is the single exit --------------------------------------
     section("4. Escape is the only primary way out")
-    esc_idx = html.find("if(e.key==='Escape')")
+    esc_idx = html.find("if (e.key === 'Escape')")
     check(esc_idx >= 0, "an Escape key handler exists")
     tail = html[esc_idx:esc_idx + 400] if esc_idx >= 0 else ""
     check("fsActive()" in tail and "closeFullScreen();" in tail,

@@ -49,6 +49,7 @@ var state = {
   selected: null,
   selection: [],
   anchor: null,
+  marquee: { armed: false, active: false, dragged: false, justDragged: false, startX: 0, startY: 0, baseSelection: [], baseAnchor: null, overlay: null },
   treeRoot: null,
   history: [],
   hIndex: -1,

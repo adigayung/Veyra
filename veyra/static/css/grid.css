@@ -5,6 +5,22 @@
    must stay cheap: no heavy shadows or filters on .card.
    ========================================================================== */
 
+.marquee-selection {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  border: 1px solid var(--accent-2);
+  background: rgba(77, 141, 255, 0.18);
+}
+
+/* While a rubber-band drag is active, suppress text selection instead of
+   calling preventDefault() on pointerdown (which would retarget/break the
+   plain click + double-click on cards). */
+.grid.marquee-active {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 .grid {
   flex: 1;
   min-height: 0;

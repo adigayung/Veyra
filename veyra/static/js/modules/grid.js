@@ -150,11 +150,103 @@ function applyScrollWindow() {
   renderWindow(center);
 }
 
-/* Wire the freshly mounted window: click / dblclick + thumbnail load/error. */
+/* -- drag-out ------------------------------------------------------------- */
+
+/* Bytes fetched ahead of a potential drag, keyed by file path.  A native
+   dragstart runs synchronously, so the File objects must be built from bytes
+   that were fetched *before* the drag began (see prefetchDragBytes). */
+var dragBytes = {};
+
+/* The images a drag started on index ``idx`` should export: the whole
+   selection when the dragged card is the primary selected one, otherwise just
+   that card.  Encrypted (.aimg) files are never exported — their plaintext
+   must not leak and the raw container is not a droppable image. */
+function dragPayloadItems(idx) {
+  var selected = (primarySelectedIndex() === idx) ? getSelectedImages() : [state.images[idx]];
+  return selected.filter(function (x) { return x && x.path && !x.encrypted; });
+}
+
+/* Best-effort warm-up of the drag byte cache via the existing /api/image
+   endpoint (local files, so this is cheap).  Failures are ignored: an
+   incomplete cache simply yields no File objects instead of a bogus payload. */
+function prefetchDragBytes(items) {
+  if (typeof fetch !== 'function') return;
+  items.forEach(function (it) {
+    if (dragBytes[it.path]) return;
+    fetch(imgUrl(it.path)).then(function (r) {
+      return (r && r.ok !== false && r.blob) ? r.blob() : null;
+    }).then(function (b) { if (b) dragBytes[it.path] = b; }).catch(function () {});
+  });
+}
+
+/* Build a VALID web drag payload: real File objects attached through
+   ``dataTransfer.items.add()``.  We deliberately do NOT call
+   ``setData('Files', ...)`` (that type is reserved and cannot hold a string)
+   nor fabricate ``file://`` "paths".
+
+   LIMITATION (documented, out of scope): a web DataTransfer cannot hand
+   arbitrary filesystem paths to a NATIVE Windows application (Explorer, an
+   editor, ...).  That needs a native OLE drag (CF_HDROP / DoDragDrop) in the
+   pywebview host (desktop.py).  Drag-out therefore targets WEB drop zones
+   only; dropping onto native apps is not supported yet. */
+function startCardDrag(e, idx) {
+  var dt = e.dataTransfer;
+  if (!dt || !dt.items || typeof dt.items.add !== 'function') return;
+  var raw = (primarySelectedIndex() === idx) ? getSelectedImages() : [state.images[idx]];
+  var hadEncrypted = raw.some(function (x) { return !!(x && x.encrypted); });
+  var items = dragPayloadItems(idx);
+  var added = 0;
+  items.forEach(function (it) {
+    var blob = dragBytes[it.path];
+    if (!blob || typeof File !== 'function') return;
+    try {
+      dt.items.add(new File([blob], it.name, { type: blob.type || 'application/octet-stream' }));
+      added++;
+    } catch (err) { /* leave the drag empty rather than fabricate data */ }
+  });
+  if (hadEncrypted) toast('File .aimg tidak bisa di-drag ke aplikasi luar.');
+  if (added) dt.effectAllowed = 'copy';
+}
+
+/* Wire the freshly mounted window: click / dblclick + marquee + thumbnail
+   load/error.
+
+   REGRESSION FIX: a *plain* press on a card must stay an ordinary click.  We
+   therefore never call setPointerCapture() nor preventDefault() on pointerdown
+   — capturing the pointer on .grid retargets the subsequent click / dblclick
+   events to the grid element in WebView2/Chromium, which silently broke
+   "double-click opens Image View".  The marquee is LAZY: the press only arms
+   it (see marqueeStart), and it activates from pointermove once the pointer
+   moves past the threshold. */
 function bindCards() {
+  els.grid.onpointerdown = function (e) {
+    /* A fresh press clears any stale post-drag flag (the browser does not
+       always emit the synthetic click after a rubber-band drag). */
+    state.marquee.justDragged = false;
+    var card = e.target && e.target.closest ? e.target.closest('.card') : null;
+    if (marqueeStart(e) && card) {
+      /* Warm the drag byte cache now: a native dragstart must fill
+         dataTransfer synchronously (see startCardDrag). */
+      prefetchDragBytes(dragPayloadItems(Number(card.dataset.index)));
+    }
+  };
+  els.grid.onpointermove = function (e) { marqueeMove(e); };
+  els.grid.onpointerup = function () {
+    /* marqueeEnd returns true only for a genuine drag (> threshold). */
+    if (marqueeEnd()) state.marquee.justDragged = true;
+  };
+  els.grid.onpointercancel = function () { marqueeEnd(); };
   els.grid.querySelectorAll('.card').forEach(function (card) {
-    card.onclick = function (e) { handleCardClick(Number(card.dataset.index), e); };
-    card.ondblclick = function () { openFullScreen(Number(card.dataset.index)); };
+    var idx = Number(card.dataset.index);
+    card.draggable = true;
+    card.onclick = function (e) { handleCardClick(idx, e); };
+    card.ondblclick = function () { openFullScreen(idx); };
+    card.ondragstart = function (e) {
+      /* A pointer rubber-band drag owns the gesture: never let a native drag
+         steal it once the marquee is active (click / marquee win on a card). */
+      if (state.marquee.active) { if (e.preventDefault) e.preventDefault(); return; }
+      startCardDrag(e, idx);
+    };
   });
   els.grid.querySelectorAll('.thumb img').forEach(function (im) {
     im.addEventListener('load', function () {
